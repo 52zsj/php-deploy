@@ -1,0 +1,59 @@
+# Gitee代码同步工具配置文件
+gitee:
+  # Gitee仓库URL
+  repo_url: "https://gitee.com/example/demo-project.git"
+  # 默认分支
+  default_branch: "develop"
+  # 本地目录
+  local_dir: "/tmp/demo-project"
+  # 认证类型：ssh或password
+  auth_type: "password"
+  # 用户名和密码（如果auth_type为password）
+  username: "username"
+  password: "password"
+  # SSH密钥路径（如果auth_type为ssh）
+  # ssh_key: "~/.ssh/id_rsa"
+
+# 同步选项
+sync:
+  # rsync选项
+  rsync_options: "-azv --delete"
+  # 排除文件和目录
+  exclude:
+    - ".git"
+    - ".gitignore"
+    - "node_modules"
+    - "vendor"
+    - "*.log"
+
+# 服务器组
+server_groups:
+  - name: "测试环境"
+    servers:
+      - name: "测试服务器1"
+        host: "user@test-server1"
+        target_dir: "/var/www/demo"
+        branch: "develop"
+        auth_type: "ssh"
+        auth_info: "~/.ssh/id_rsa"
+      - name: "测试服务器2"
+        host: "user@test-server2"
+        target_dir: "/var/www/demo"
+        branch: "develop"
+        auth_type: "password"
+        auth_info: "server_password"
+  
+  - name: "生产环境"
+    servers:
+      - name: "生产服务器1"
+        host: "user@prod-server1"
+        target_dir: "/var/www/demo"
+        branch: "master"
+        auth_type: "ssh"
+        auth_info: "~/.ssh/id_rsa"
+      - name: "生产服务器2"
+        host: "user@prod-server2"
+        target_dir: "/var/www/demo"
+        branch: "master"
+        auth_type: "ssh"
+        auth_info: "~/.ssh/id_rsa" 
