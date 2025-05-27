@@ -10,14 +10,16 @@ YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# 保存脚本初始目录
-SCRIPT_DIR=$(pwd)
+# 保存脚本文件所在目录
+SCRIPT_DIR=$(cd $(dirname "$0") && pwd)
 
-# 展开路径中的~为用户主目录
+# 展开路径中的~为用户主目录，./为脚本目录
 expand_path() {
     local path="$1"
-    if [[ "$path" == "~"* ]]; then
+    if [[ "$path" == ~* ]]; then
         path="${HOME}${path:1}"
+    elif [[ "$path" == ./* ]]; then
+        path="$SCRIPT_DIR/${path#./}"
     fi
     echo "$path"
 }
@@ -378,6 +380,68 @@ print(' '.join(branches))
         
         echo -e "${GREEN}代码克隆完成${NC}"
     fi
+}
+
+# 替换环境配置文件
+replace_configs() {
+    echo -e "${YELLOW}替换环境配置文件...${NC}"
+    
+    # 获取替换目录和环境标识
+    if command -v yq >/dev/null 2>&1; then
+        REPLACE_BASE_DIR=$(yq e '.sync.replace_dir' "$CONFIG_FILE")
+        ENV_ID=$(yq e ".server_groups[$GROUP_INDEX].env // \"\"" "$CONFIG_FILE")
+    else
+        REPLACE_BASE_DIR=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin).get('sync', {}).get('replace_dir', ''))")
+        ENV_ID=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['server_groups'][$GROUP_INDEX].get('env', ''))")
+    fi
+    
+    # 如果没有配置替换目录或环境标识，则跳过
+    if [ -z "$REPLACE_BASE_DIR" ] || [ -z "$ENV_ID" ]; then
+        echo -e "${YELLOW}未配置替换目录或环境标识，跳过配置替换${NC}"
+        return
+    fi
+    
+    # 展开替换目录路径
+    REPLACE_BASE_DIR=$(expand_path "$REPLACE_BASE_DIR")
+    REPLACE_DIR="$REPLACE_BASE_DIR/$ENV_ID"
+    
+    echo -e "${YELLOW}使用环境: $ENV_ID${NC}"
+    echo -e "${YELLOW}替换目录: $REPLACE_DIR${NC}"
+    
+    # 检查替换目录是否存在
+    if [ ! -d "$REPLACE_DIR" ]; then
+        echo -e "${YELLOW}替换目录 $REPLACE_DIR 不存在，跳过配置替换${NC}"
+        return
+    fi
+    
+    # 切换到正确的分支
+    cd "$LOCAL_DIR"
+    
+    # 获取当前分支
+    CURRENT_BRANCH=$(git branch --show-current)
+    echo -e "${YELLOW}当前分支: $CURRENT_BRANCH${NC}"
+    
+    # 递归替换文件
+    echo -e "${YELLOW}开始替换配置文件...${NC}"
+    
+    # 使用find命令查找替换目录中的所有文件
+    find "$REPLACE_DIR" -type f -print | while read replace_file; do
+        # 计算相对路径
+        rel_path="${replace_file#$REPLACE_DIR/}"
+        target_file="$LOCAL_DIR/$rel_path"
+        target_dir=$(dirname "$target_file")
+        
+        # 确保目标目录存在
+        if [ ! -d "$target_dir" ]; then
+            mkdir -p "$target_dir"
+        fi
+        
+        # 替换文件
+        cp -f "$replace_file" "$target_file"
+        echo -e "${GREEN}替换文件: $rel_path${NC}"
+    done
+    
+    echo -e "${GREEN}配置文件替换完成${NC}"
 }
 
 # 同步到服务器
@@ -748,6 +812,7 @@ main() {
     parse_config
     select_server_group
     pull_code
+    replace_configs
     sync_to_servers
     cleanup_credentials
     

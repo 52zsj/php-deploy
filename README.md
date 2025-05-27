@@ -113,9 +113,26 @@ gitee:
   # username: "your_username"
   # password: "your_password"
 
+# 同步配置
+sync:
+  # 忽略的文件和目录，使用rsync格式
+  exclude:
+    - ".git/"
+    - ".gitignore"
+    - "*.log"
+    - "node_modules/"
+    # 添加更多需要忽略的文件或目录...
+  
+  # rsync选项
+  rsync_options: "-avz --delete"  # 可根据需要调整
+  
+  # 配置替换目录
+  replace_dir: "~/replace/demo"   # 基础替换目录
+
 # 服务器配置组
 server_groups:
   - name: "测试环境"                           # 服务器组名称
+    env: "develop"                             # 环境标识，用于选择配置替换目录
     servers:
       - name: "测试服务器"                     # 服务器名称
         host: "user@test-server.com"           # 服务器地址
@@ -125,6 +142,7 @@ server_groups:
         auth_info: "your_password"             # 密码或SSH密钥路径
   
   - name: "生产环境"                           # 另一个服务器组
+    env: "product"                             # 环境标识，用于选择配置替换目录
     servers:
       - name: "生产服务器1"                    # 服务器名称
         host: "user@prod-server1.com"          # 服务器地址
@@ -139,20 +157,6 @@ server_groups:
         branch: "master"                       # 使用的分支
         auth_type: "ssh"                       # 认证类型
         auth_info: "~/.ssh/prod_key"           # SSH密钥路径
-
-# 同步配置
-sync:
-  # 忽略的文件和目录，使用rsync格式
-  exclude:
-    - ".git/"
-    - ".gitignore"
-    - "*.log"
-    - "node_modules/"
-    # 添加更多需要忽略的文件或目录...
-  
-  # rsync选项
-  rsync_options: "-avz --delete"  # 可根据需要调整
-```
 
 ## 多项目和服务器分组支持
 
@@ -274,3 +278,52 @@ crontab -e
    - 检查`.credentials`目录下是否存在对应配置文件的凭据文件
    - 确保凭据文件中的用户名和密码正确
    - 如需重置凭据，可以删除对应的凭据文件 
+
+## 环境配置替换
+
+该工具支持根据不同环境自动替换配置文件：
+
+1. 在配置文件中设置基础替换目录：
+   ```yaml
+   sync:
+     replace_dir: "~/replace/demo"  # 基础替换目录
+   ```
+
+2. 为每个服务器组设置环境标识：
+   ```yaml
+   server_groups:
+     - name: "测试环境"
+       env: "develop"  # 环境标识
+       # ...
+     
+     - name: "生产环境"
+       env: "product"  # 环境标识
+       # ...
+   ```
+
+3. 创建对应的环境配置目录结构：
+   ```
+   ~/replace/demo/
+   ├── develop/        # 测试环境配置
+   │   ├── config/
+   │   │   └── app.php
+   │   └── .env
+   │
+   └── product/        # 生产环境配置
+       ├── config/
+       │   └── app.php
+       └── .env
+   ```
+
+4. 工作原理：
+   - 脚本会根据选择的服务器组确定环境标识（如 `develop` 或 `product`）
+   - 然后查找对应环境目录下的所有文件（如 `~/replace/demo/develop/` 或 `~/replace/demo/product/`）
+   - 将这些文件复制到对应的Git仓库目录中，保持相同的目录结构
+   - 例如，`~/replace/demo/develop/config/app.php` 会替换 `本地仓库目录/config/app.php`
+
+5. 注意事项：
+   - 替换目录中的文件结构应与Git仓库中的结构保持一致
+   - 只有替换目录中存在的文件会被替换，其他文件保持不变
+   - 如果替换目录不存在或环境标识未设置，则跳过替换步骤
+
+这种方式允许您为不同环境（如测试环境、预发布环境、生产环境）维护不同的配置文件，而无需将这些配置文件提交到Git仓库中。 

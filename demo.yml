@@ -25,10 +25,14 @@ sync:
     - "node_modules"
     - "vendor"
     - "*.log"
+  # 配置替换目录
+  replace_dir: "~/replace/demo"
 
 # 服务器组
 server_groups:
   - name: "测试环境"
+    # 环境标识，用于选择配置替换目录
+    env: "develop"
     servers:
       - name: "测试服务器1"
         host: "user@test-server1"
@@ -44,6 +48,8 @@ server_groups:
         auth_info: "server_password"
   
   - name: "生产环境"
+    # 环境标识，用于选择配置替换目录
+    env: "product"
     servers:
       - name: "生产服务器1"
         host: "user@prod-server1"
