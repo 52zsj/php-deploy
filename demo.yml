@@ -17,7 +17,7 @@ gitee:
 # 同步选项
 sync:
   # rsync选项
-  rsync_options: "-azv --delete"
+  rsync_options: "-az --delete --progress"
   # 排除文件和目录
   exclude:
     - ".git"
@@ -25,14 +25,41 @@ sync:
     - "node_modules"
     - "vendor"
     - "*.log"
+    # 保护运行时目录和文件
+    - "runtime/"
+    - "logs/"
+    - "log/"
+    - "uploads/"
+    - "upload/"
+    - "storage/"
+    - "cache/"
+    - "temp/"
+    - "tmp/"
+    - "data/"
+    - "backup/"
+    - "*.pid"
+    - "*.lock"
+    - "*.tmp"
   # 配置替换目录
   replace_dir: "~/replace/demo"
+
+# 全局默认的同步后执行命令（优先级最低）
+default_post_sync_commands:
+  - "chown -R www-data:www-data {target_dir}"
+  - "find {target_dir} -type d -exec chmod 755 {} \\;"
+  - "find {target_dir} -type f -exec chmod 644 {} \\;"
 
 # 服务器组
 server_groups:
   - name: "测试环境"
     # 环境标识，用于选择配置替换目录
     env: "develop"
+    # 服务器组级别的同步后执行命令（覆盖全局默认，优先级中等）
+    post_sync_commands:
+      - "chown -R nginx:nginx {target_dir}"
+      - "find {target_dir} -type d -exec chmod 755 {} \\;"
+      - "find {target_dir} -type f -exec chmod 644 {} \\;"
+      - "systemctl reload nginx"
     servers:
       - name: "测试服务器1"
         host: "user@test-server1"
@@ -40,16 +67,23 @@ server_groups:
         branch: "develop"
         auth_type: "ssh"
         auth_info: "~/.ssh/id_rsa"
+        # 服务器级别的同步后执行命令（优先级最高，覆盖服务器组和全局设置）
+        post_sync_commands:
+          - "chown -R apache:apache {target_dir}"
+          - "chmod -R 755 {target_dir}"
+          - "systemctl restart httpd"
       - name: "测试服务器2"
         host: "user@test-server2"
         target_dir: "/var/www/demo"
         branch: "develop"
         auth_type: "password"
         auth_info: "server_password"
-  
+        # 不配置，使用服务器组的权限设置
+
   - name: "生产环境"
     # 环境标识，用于选择配置替换目录
     env: "product"
+    # 生产环境使用全局默认权限设置
     servers:
       - name: "生产服务器1"
         host: "user@prod-server1"
@@ -57,9 +91,15 @@ server_groups:
         branch: "master"
         auth_type: "ssh"
         auth_info: "~/.ssh/id_rsa"
+        # 使用全局默认权限设置
       - name: "生产服务器2"
         host: "user@prod-server2"
         target_dir: "/var/www/demo"
         branch: "master"
         auth_type: "ssh"
-        auth_info: "~/.ssh/id_rsa" 
+        auth_info: "~/.ssh/id_rsa"
+        # 服务器级别自定义权限
+        post_sync_commands:
+          - "chown -R www:www {target_dir}"
+          - "find {target_dir} -name '*.php' -exec chmod 644 {} \\;"
+          - "systemctl reload php-fpm"
