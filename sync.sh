@@ -894,6 +894,7 @@ sync_to_servers() {
             echo -e "${YELLOW}开始执行rsync同步...${NC}"
             echo -e "${BLUE}执行命令: $RSYNC_CMD${NC}"
             eval $RSYNC_CMD
+            RSYNC_EXIT_CODE=$?
         else
             # 精简模式：后台执行并显示进度
             local temp_rsync_output=$(mktemp)
@@ -910,19 +911,16 @@ sync_to_servers() {
             # 显示进度
             show_progress "正在同步文件到服务器" "$rsync_pid"
             wait "$rsync_pid"
-            local rsync_exit_code=$?
+            RSYNC_EXIT_CODE=$?
 
             # 显示rsync统计信息
-            if [ $rsync_exit_code -eq 0 ] && [ -f "$temp_rsync_output" ]; then
+            if [ $RSYNC_EXIT_CODE -eq 0 ] && [ -f "$temp_rsync_output" ]; then
                 tail -3 "$temp_rsync_output"
             fi
 
             # 清理临时文件
             rm -f "$temp_rsync_output"
-
-            return $rsync_exit_code
         fi
-        RSYNC_EXIT_CODE=$?
 
         # 清理rsync密码文件
         if [ -n "$TEMP_RSYNC_PASS_FILE" ] && [ -f "$TEMP_RSYNC_PASS_FILE" ]; then
