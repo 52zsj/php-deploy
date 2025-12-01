@@ -8,17 +8,23 @@
 
 # 解析命令行参数
 VERBOSE=false
+LOG_FILE=""
 for arg in "$@"; do
     case $arg in
         -v|--verbose)
             VERBOSE=true
             shift
             ;;
+        --log=*)
+            LOG_FILE="${arg#*=}"
+            shift
+            ;;
         -h|--help)
             echo "用法: $0 [选项]"
             echo "选项:"
-            echo "  -v, --verbose    显示详细输出"
-            echo "  -h, --help       显示帮助信息"
+            echo "  -v, --verbose        显示详细输出"
+            echo "  --log=/path/file     将关键日志额外写入到指定文件"
+            echo "  -h, --help           显示帮助信息"
             exit 0
             ;;
         *)
@@ -34,6 +40,55 @@ done
 # 设置严格模式
 set -e
 
+# 颜色定义（统一颜色方案）
+RED='\033[0;31m'      # 错误/失败
+GREEN='\033[0;32m'    # 成功/完成
+YELLOW='\033[0;33m'   # 警告/提示
+BLUE='\033[0;34m'     # 信息/普通
+CYAN='\033[0;36m'     # 高亮/强调
+NC='\033[0m'          # No Color
+
+# 日志函数，带时间戳和颜色区分，便于调试和查看
+log_info() {
+    local msg="$1"
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "[${ts}] ${BLUE}[INFO]${NC} $msg"
+    if [ -n "$LOG_FILE" ]; then
+        echo "[${ts}] [INFO] $msg" >> "$LOG_FILE"
+    fi
+}
+
+log_success() {
+    local msg="$1"
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "[${ts}] ${GREEN}[SUCCESS]${NC} $msg"
+    if [ -n "$LOG_FILE" ]; then
+        echo "[${ts}] [SUCCESS] $msg" >> "$LOG_FILE"
+    fi
+}
+
+log_warn() {
+    local msg="$1"
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "[${ts}] ${YELLOW}[WARN]${NC} $msg"
+    if [ -n "$LOG_FILE" ]; then
+        echo "[${ts}] [WARN] $msg" >> "$LOG_FILE"
+    fi
+}
+
+log_error() {
+    local msg="$1"
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "[${ts}] ${RED}[ERROR]${NC} $msg"
+    if [ -n "$LOG_FILE" ]; then
+        echo "[${ts}] [ERROR] $msg" >> "$LOG_FILE"
+    fi
+}
+
 # 安全验证函数
 validate_path() {
     local path="$1"
@@ -41,31 +96,24 @@ validate_path() {
 
     # 检查路径是否包含危险字符
     if [[ "$path" =~ \.\./|\.\.\\ ]]; then
-        echo -e "${RED}错误：路径包含危险的相对路径符号: $path${NC}"
+        log_error "路径包含危险的相对路径符号: $path"
         return 1
     fi
 
     # 检查是否为系统关键目录
     case "$path" in
         /|/bin|/sbin|/usr|/etc|/boot|/dev|/proc|/sys|/run)
-            echo -e "${RED}错误：不允许操作系统关键目录: $path${NC}"
+            log_error "不允许操作系统关键目录: $path"
             return 1
             ;;
         /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*|/etc/*)
-            echo -e "${RED}错误：不允许操作系统关键目录下的文件: $path${NC}"
+            log_error "不允许操作系统关键目录下的文件: $path"
             return 1
             ;;
     esac
 
     return 0
 }
-
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
 
 # 动态进度提示函数
 show_progress() {
@@ -98,7 +146,7 @@ safe_git_command() {
     local args=("$@")
 
     if [ "$VERBOSE" = true ]; then
-        echo -e "${BLUE}执行Git命令: git $git_cmd ${args[*]}${NC}"
+        log_info "执行Git命令: git $git_cmd ${args[*]}"
         git "$git_cmd" "${args[@]}"
     else
         # 在后台执行命令
@@ -150,24 +198,24 @@ urlencode() {
 
 # 检查依赖
 check_dependencies() {
-    echo -e "${YELLOW}检查依赖...${NC}"
+    log_info "检查依赖..."
 
-    command -v git >/dev/null 2>&1 || { echo -e "${RED}错误：git 未安装${NC}"; exit 1; }
-    command -v rsync >/dev/null 2>&1 || { echo -e "${RED}错误：rsync 未安装${NC}"; exit 1; }
-    command -v yq >/dev/null 2>&1 || { echo -e "${RED}警告：yq 未安装，将尝试使用Python处理YAML文件${NC}"; }
-    command -v sshpass >/dev/null 2>&1 || { echo -e "${YELLOW}警告：sshpass 未安装，将无法使用密码认证进行SSH连接${NC}"; }
+    command -v git >/dev/null 2>&1 || { log_error "git 未安装"; exit 1; }
+    command -v rsync >/dev/null 2>&1 || { log_error "rsync 未安装"; exit 1; }
+    command -v yq >/dev/null 2>&1 || { log_warn "yq 未安装，将尝试使用Python处理YAML文件"; }
+    command -v sshpass >/dev/null 2>&1 || { log_warn "sshpass 未安装，将无法使用密码认证进行SSH连接"; }
 
     if ! command -v yq >/dev/null 2>&1; then
-        command -v python3 >/dev/null 2>&1 || { echo -e "${RED}错误：既没有安装yq也没有安装python3，无法解析YAML文件${NC}"; exit 1; }
-        python3 -c "import yaml" 2>/dev/null || { echo -e "${RED}错误：python3 的 PyYAML 包未安装，请执行 'pip3 install pyyaml'${NC}"; exit 1; }
+        command -v python3 >/dev/null 2>&1 || { log_error "既没有安装yq也没有安装python3，无法解析YAML文件"; exit 1; }
+        python3 -c "import yaml" 2>/dev/null || { log_error "python3 的 PyYAML 包未安装，请执行 'pip3 install pyyaml'"; exit 1; }
     fi
 
-    echo -e "${GREEN}所有依赖检查通过${NC}"
+    log_success "所有依赖检查通过"
 }
 
 # 列出并选择配置文件
 select_config_file() {
-    echo -e "${YELLOW}查找可用的配置文件...${NC}"
+    log_info "查找可用的配置文件..."
 
     # 使用兼容macOS和Linux的方式查找所有.yml文件
     CONFIG_FILES=()
@@ -180,11 +228,11 @@ select_config_file() {
 
     # 如果没有找到任何配置文件
     if [ ${#CONFIG_FILES[@]} -eq 0 ]; then
-        echo -e "${RED}错误：未找到任何.yml配置文件${NC}"
+        log_error "未找到任何.yml配置文件"
         exit 1
     fi
 
-    echo -e "${GREEN}找到以下配置文件:${NC}"
+    log_info "找到以下配置文件:"
 
     # 显示找到的配置文件列表
     for i in "${!CONFIG_FILES[@]}"; do
@@ -196,7 +244,7 @@ select_config_file() {
 
     # 验证用户输入
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#CONFIG_FILES[@]} ]; then
-        echo -e "${RED}错误：无效的选择${NC}"
+        log_error "无效的选择"
         exit 1
     fi
 
@@ -204,15 +252,15 @@ select_config_file() {
     CONFIG_FILE="${CONFIG_FILES[$((choice-1))]}"
     # 使用绝对路径
     CONFIG_FILE="$SCRIPT_DIR/$CONFIG_FILE"
-    echo -e "${GREEN}已选择配置文件: $CONFIG_FILE${NC}"
+    log_info "已选择配置文件: $CONFIG_FILE"
 }
 
 # 解析YAML配置文件
 parse_config() {
-    echo -e "${YELLOW}解析配置文件...${NC}"
+    log_info "解析配置文件: $CONFIG_FILE"
 
     if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}错误：配置文件 $CONFIG_FILE 不存在${NC}"
+        log_error "配置文件 $CONFIG_FILE 不存在"
         exit 1
     fi
 
@@ -304,28 +352,28 @@ EOF
 
     # 验证Git认证类型
     if [ "$GIT_AUTH_TYPE" != "ssh" ] && [ "$GIT_AUTH_TYPE" != "password" ]; then
-        echo -e "${RED}错误：Gitee认证类型必须为'ssh'或'password'${NC}"
+        log_error "Gitee认证类型必须为'ssh'或'password'"
         exit 1
     fi
 
     # 如果是SSH认证，检查SSH密钥
     if [ "$GIT_AUTH_TYPE" = "ssh" ] && [ -z "$GIT_SSH_KEY" ]; then
-        echo -e "${RED}错误：使用SSH认证时，必须设置SSH密钥路径${NC}"
+        log_error "使用SSH认证时，必须设置SSH密钥路径"
         exit 1
     fi
 
     # 如果是密码认证，检查用户名和密码
     if [ "$GIT_AUTH_TYPE" = "password" ] && { [ -z "$GIT_USERNAME" ] || [ -z "$GIT_PASSWORD" ]; }; then
-        echo -e "${RED}错误：使用密码认证时，必须设置用户名和密码${NC}"
+        log_error "使用密码认证时，必须设置用户名和密码"
         exit 1
     fi
 
-    echo -e "${GREEN}配置解析完成${NC}"
+    log_success "配置解析完成：repo=$REPO_URL, local_dir=$LOCAL_DIR, auth_type=$GIT_AUTH_TYPE"
 }
 
 # 选择服务器组
 select_server_group() {
-    echo -e "${YELLOW}选择要部署的服务器组:${NC}"
+    log_info "选择要部署的服务器组..."
 
     # 显示服务器组列表
     if command -v yq >/dev/null 2>&1; then
@@ -348,7 +396,7 @@ for i, group in enumerate(data['server_groups']):
 
     # 验证用户输入
     if ! [[ "$group_choice" =~ ^[0-9]+$ ]] || [ "$group_choice" -lt 1 ] || [ "$group_choice" -gt $GROUP_COUNT ]; then
-        echo -e "${RED}错误：无效的选择${NC}"
+        log_error "无效的选择"
         exit 1
     fi
 
@@ -363,7 +411,7 @@ for i, group in enumerate(data['server_groups']):
         SERVER_COUNT=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(len(json.load(sys.stdin)['server_groups'][$GROUP_INDEX]['servers']))")
     fi
 
-    echo -e "${GREEN}已选择服务器组: $SELECTED_GROUP_NAME${NC}"
+    log_info "已选择服务器组: $SELECTED_GROUP_NAME (索引: $GROUP_INDEX, 服务器数量: $SERVER_COUNT)"
 }
 
 # 设置git凭据（仅准备凭据文件和URL，不执行git config）
@@ -388,19 +436,17 @@ setup_git_credentials() {
             # 构建带有认证信息的URL
             REPO_URL="${protocol}${username_encoded}:${password_encoded}@${repo_path}"
 
-            echo -e "${GREEN}已配置Git认证信息${NC}"
+            log_info "已配置Git HTTPS 认证信息（使用用户名密码）"
         else
-            echo -e "${RED}错误：使用密码认证时，仓库URL必须是HTTPS格式${NC}"
+            log_error "使用密码认证时，仓库URL必须是HTTPS格式，当前: $REPO_URL"
             exit 1
         fi
 
-        echo -e "${GREEN}Git凭据将存储在: $GIT_CREDENTIALS_FILE${NC}"
+        log_info "Git 凭据文件: $GIT_CREDENTIALS_FILE"
     elif [ "$GIT_AUTH_TYPE" = "ssh" ]; then
         # 确保SSH密钥存在
         if [ ! -f "$GIT_SSH_KEY" ]; then
-            echo -e "${RED}错误：SSH密钥 $GIT_SSH_KEY 不存在${NC}"
-            echo -e "${YELLOW}请检查配置文件中的SSH密钥路径是否正确${NC}"
-            echo -e "${YELLOW}当前用户主目录: $HOME${NC}"
+            log_error "SSH密钥 $GIT_SSH_KEY 不存在，请检查配置文件中的 ssh_key 路径；当前 HOME=$HOME"
             exit 1
         fi
 
@@ -411,7 +457,7 @@ setup_git_credentials() {
 
 # 拉取所有需要的分支
 pull_code() {
-    echo -e "${YELLOW}拉取代码...${NC}"
+    log_info "开始拉取代码到本地目录: $LOCAL_DIR"
 
     # 设置git凭据
     setup_git_credentials
@@ -457,7 +503,7 @@ print(' '.join(branches))
 
         # 检出并更新每个需要的分支
         for branch in "${REQUIRED_BRANCHES[@]}"; do
-            echo -e "${YELLOW}更新分支: $branch${NC}"
+            log_info "更新分支: $branch"
 
             # 切换分支
             if [ "$VERBOSE" = true ]; then
@@ -473,7 +519,7 @@ print(' '.join(branches))
             safe_git_command "正在拉取分支 $branch 的最新代码" "pull" "origin" "$branch"
         done
 
-        echo -e "${GREEN}代码更新完成${NC}"
+        log_success "代码更新完成，更新分支: ${REQUIRED_BRANCHES[*]}"
     else
         # 克隆默认分支
         safe_git_command "正在克隆代码" "clone" "--branch" "$DEFAULT_BRANCH" "$REPO_URL" "."
@@ -486,18 +532,18 @@ print(' '.join(branches))
         # 获取其他需要的分支
         for branch in "${REQUIRED_BRANCHES[@]}"; do
             if [ "$branch" != "$DEFAULT_BRANCH" ]; then
-                echo -e "${YELLOW}获取分支: $branch${NC}"
+                log_info "获取分支: $branch"
                 git checkout -b "$branch" "origin/$branch"
             fi
         done
 
-        echo -e "${GREEN}代码克隆完成${NC}"
+        log_success "代码克隆完成，默认分支: $DEFAULT_BRANCH，其它分支: ${REQUIRED_BRANCHES[*]}"
     fi
 }
 
 # 替换环境配置文件
 replace_configs() {
-    echo -e "${YELLOW}替换环境配置文件...${NC}"
+    log_info "开始替换环境配置文件..."
 
     # 获取替换目录和环境标识
     if command -v yq >/dev/null 2>&1; then
@@ -510,7 +556,7 @@ replace_configs() {
 
     # 如果没有配置替换目录或环境标识，则跳过
     if [ -z "$REPLACE_BASE_DIR" ] || [ -z "$ENV_ID" ]; then
-        echo -e "${YELLOW}未配置替换目录或环境标识，跳过配置替换${NC}"
+        log_warn "未配置替换目录或环境标识，跳过配置替换"
         return
     fi
 
@@ -518,12 +564,12 @@ replace_configs() {
     REPLACE_BASE_DIR=$(expand_path "$REPLACE_BASE_DIR")
     REPLACE_DIR="$REPLACE_BASE_DIR/$ENV_ID"
 
-    echo -e "${YELLOW}使用环境: $ENV_ID${NC}"
-    echo -e "${YELLOW}替换目录: $REPLACE_DIR${NC}"
+    log_info "使用环境: $ENV_ID"
+    log_info "替换目录: $REPLACE_DIR"
 
     # 检查替换目录是否存在
     if [ ! -d "$REPLACE_DIR" ]; then
-        echo -e "${YELLOW}替换目录 $REPLACE_DIR 不存在，跳过配置替换${NC}"
+        log_warn "替换目录 $REPLACE_DIR 不存在，跳过配置替换"
         return
     fi
 
@@ -532,11 +578,11 @@ replace_configs() {
 
     # 获取当前分支
     CURRENT_BRANCH=$(git branch --show-current)
-    echo -e "${YELLOW}当前分支: $CURRENT_BRANCH${NC}"
+    log_info "当前分支: $CURRENT_BRANCH"
 
     # 递归替换文件
     if [ "$VERBOSE" = true ]; then
-        echo -e "${YELLOW}开始替换配置文件...${NC}"
+        log_info "开始替换配置文件..."
 
         # 详细模式：显示每个文件
         find "$REPLACE_DIR" -type f -print | while read replace_file; do
@@ -549,10 +595,10 @@ replace_configs() {
             fi
 
             cp -f "$replace_file" "$target_file"
-            echo -e "${GREEN}替换文件: $rel_path${NC}"
+            log_success "替换文件: $rel_path"
         done
 
-        echo -e "${GREEN}配置文件替换完成${NC}"
+        log_success "配置文件替换完成"
     else
         # 精简模式：后台执行并显示进度
         replace_config_files_background() {
@@ -579,25 +625,25 @@ replace_configs() {
 
         # 统计替换的文件数量
         local total_files=$(find "$REPLACE_DIR" -type f | wc -l)
-        echo -e "${GREEN}已替换 $total_files 个配置文件${NC}"
+        log_success "已替换 $total_files 个配置文件"
     fi
 }
 
 # 同步到服务器
 sync_to_servers() {
-    echo -e "${YELLOW}开始同步到服务器...${NC}"
+    log_info "开始同步到服务器..."
 
     # 检查是否存在代理环境变量
     HAS_PROXY=0
     if env | grep -i proxy > /dev/null; then
-        echo -e "${YELLOW}检测到代理环境变量:${NC}"
+        log_warn "检测到代理环境变量，将提示是否在 SSH 期间临时关闭"
         env | grep -i proxy
         HAS_PROXY=1
 
         # 询问是否为SSH连接临时禁用代理
         read -p "是否为SSH连接临时禁用代理? (y/n): " disable_proxy_choice
         if [ "$disable_proxy_choice" = "y" ] || [ "$disable_proxy_choice" = "Y" ]; then
-            echo -e "${YELLOW}临时禁用所有代理环境变量...${NC}"
+            log_info "用户选择临时禁用所有代理环境变量"
             # 备份当前代理设置
             export BACKUP_HTTP_PROXY=$http_proxy
             export BACKUP_HTTPS_PROXY=$https_proxy
@@ -606,7 +652,7 @@ sync_to_servers() {
 
             # 清除所有代理变量
             unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
-            echo -e "${GREEN}已临时禁用代理${NC}"
+            log_info "已临时禁用代理环境变量"
         fi
     fi
 
@@ -643,8 +689,8 @@ sync_to_servers() {
             continue
         fi
 
-        echo -e "${YELLOW}同步到服务器: $SERVER_NAME ($SERVER_HOST)${NC}"
-        echo -e "${YELLOW}使用分支: $SERVER_BRANCH${NC}"
+        # 使用纯英文分隔，避免某些终端对中文标点编码不一致导致乱码
+        log_info "sync to server: name=$SERVER_NAME host=$SERVER_HOST branch=$SERVER_BRANCH target_dir=$TARGET_DIR"
 
         # 切换到正确的分支
         cd "$LOCAL_DIR"
@@ -661,51 +707,49 @@ sync_to_servers() {
         fi
 
         # 测试与服务器的连接
-        echo -e "${YELLOW}测试与服务器 $SERVER_HOSTNAME 的连接...${NC}"
+        log_info "测试与服务器 $SERVER_HOSTNAME 的连接..."
 
         # 跳过ping测试，直接测试SSH连接
-        echo -e "${YELLOW}注意: 跳过ping测试，直接测试SSH连接${NC}"
+        log_info "跳过 ping 测试，直接测试 SSH 连接"
 
         # 根据认证类型构建rsync命令
         RSYNC_SSH_OPTS=""
         if [ "$AUTH_TYPE" = "ssh" ]; then
             if [ ! -f "$AUTH_INFO" ]; then
-                echo -e "${RED}错误：SSH密钥 $AUTH_INFO 不存在${NC}"
-                echo -e "${YELLOW}请检查配置文件中的SSH密钥路径是否正确${NC}"
-                echo -e "${YELLOW}当前用户主目录: $HOME${NC}"
+            log_error "SSH密钥 $AUTH_INFO 不存在，当前 HOME=$HOME"
                 exit 1
             fi
 
             # 测试SSH连接
-            echo -e "${YELLOW}测试SSH连接...${NC}"
+            log_info "测试 SSH 连接 (密钥认证)..."
             ssh -i "$AUTH_INFO" -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes "$SERVER_HOST" "echo 连接成功" 2>&1
             if [ $? -ne 0 ]; then
-                echo -e "${RED}错误：SSH连接测试失败${NC}"
-                echo -e "${YELLOW}请确认以下信息:${NC}"
-                echo -e "1. ${YELLOW}服务器 $SERVER_HOSTNAME 是否可达${NC}"
-                echo -e "2. ${YELLOW}SSH密钥 $AUTH_INFO 是否有效${NC}"
-                echo -e "3. ${YELLOW}SSH密钥权限是否正确 (应为600)${NC}"
-                echo -e "4. ${YELLOW}服务器SSH配置是否允许密钥认证${NC}"
-                echo -e "5. ${YELLOW}是否存在网络代理问题${NC}"
+                log_error "SSH 连接测试失败"
+                log_warn "请确认以下信息:"
+                echo -e "  1. ${CYAN}服务器 $SERVER_HOSTNAME 是否可达${NC}"
+                echo -e "  2. ${CYAN}SSH密钥 $AUTH_INFO 是否有效${NC}"
+                echo -e "  3. ${CYAN}SSH密钥权限是否正确 (应为600)${NC}"
+                echo -e "  4. ${CYAN}服务器SSH配置是否允许密钥认证${NC}"
+                echo -e "  5. ${CYAN}是否存在网络代理问题${NC}"
 
                 # 设置SSH密钥权限为600
-                echo -e "${YELLOW}尝试修复SSH密钥权限...${NC}"
+                log_warn "尝试修复 SSH 密钥权限为 600"
                 chmod 600 "$AUTH_INFO"
-                echo -e "${GREEN}已设置SSH密钥权限为600${NC}"
+                log_info "已设置 SSH 密钥权限为 600"
 
-                echo -e "${YELLOW}再次测试SSH连接...${NC}"
+                log_info "再次测试 SSH 连接 (修复权限后)..."
                 ssh -i "$AUTH_INFO" -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes "$SERVER_HOST" "echo 连接成功" 2>&1
                 if [ $? -ne 0 ]; then
-                    echo -e "${RED}修复权限后SSH连接仍然失败${NC}"
+                    log_error "修复权限后 SSH 连接仍然失败"
 
                     # 询问是否跳过代理
                     read -p "是否尝试使用无代理模式连接? (y/n): " direct_conn_choice
                     if [ "$direct_conn_choice" = "y" ] || [ "$direct_conn_choice" = "Y" ]; then
-                        echo -e "${YELLOW}尝试直接连接...${NC}"
+                        log_info "用户选择尝试无代理模式直接连接"
                         # 确保所有可能的代理变量都被清除
                         unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-                        echo -e "${YELLOW}使用调试模式尝试SSH连接...${NC}"
+                        log_info "使用 -v 调试模式尝试 SSH 连接（密钥）"
                         ssh -v -i "$AUTH_INFO" -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$SERVER_HOST" "echo 调试模式连接成功" 2>&1
 
                         # 询问是否跳过此服务器
@@ -713,53 +757,53 @@ sync_to_servers() {
                         if [ "$force_sync_choice" != "y" ] && [ "$force_sync_choice" != "Y" ]; then
                             read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
                             if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
-                                echo -e "${YELLOW}跳过服务器 $SERVER_NAME${NC}"
+                                log_warn "跳过服务器 $SERVER_NAME"
                                 continue
                             else
-                                echo -e "${RED}同步中止${NC}"
+                                log_error "同步中止"
 
                                 # 恢复代理设置
                                 if [ $HAS_PROXY -eq 1 ] && [ "$disable_proxy_choice" = "y" ]; then
-                                    echo -e "${YELLOW}恢复代理设置...${NC}"
+                                    log_info "恢复代理设置..."
                                     export http_proxy=$BACKUP_HTTP_PROXY
                                     export https_proxy=$BACKUP_HTTPS_PROXY
                                     export all_proxy=$BACKUP_ALL_PROXY
                                     export no_proxy=$BACKUP_NO_PROXY
-                                    echo -e "${GREEN}代理设置已恢复${NC}"
+                                    log_success "代理设置已恢复"
                                 fi
 
                                 exit 1
                             fi
                         else
-                            echo -e "${YELLOW}强制继续同步...${NC}"
+                            log_warn "强制继续同步..."
                         fi
                     else
                         # 询问是否跳过此服务器
                         read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
                         if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
-                            echo -e "${YELLOW}跳过服务器 $SERVER_NAME${NC}"
+                            log_warn "跳过服务器 $SERVER_NAME"
                             continue
                         else
-                            echo -e "${RED}同步中止${NC}"
+                                log_error "用户选择中止同步"
 
                             # 恢复代理设置
                             if [ $HAS_PROXY -eq 1 ] && [ "$disable_proxy_choice" = "y" ]; then
-                                echo -e "${YELLOW}恢复代理设置...${NC}"
+                                    log_info "恢复代理设置..."
                                 export http_proxy=$BACKUP_HTTP_PROXY
                                 export https_proxy=$BACKUP_HTTPS_PROXY
                                 export all_proxy=$BACKUP_ALL_PROXY
                                 export no_proxy=$BACKUP_NO_PROXY
-                                echo -e "${GREEN}代理设置已恢复${NC}"
+                                    log_info "代理设置已恢复"
                             fi
 
                             exit 1
                         fi
                     fi
                 else
-                    echo -e "${GREEN}修复权限后SSH连接成功${NC}"
+                    log_success "修复权限后 SSH 连接成功"
                 fi
             else
-                echo -e "${GREEN}SSH连接测试成功${NC}"
+                log_success "SSH 连接测试成功 (密钥认证)"
             fi
 
             # 使用无代理环境变量的SSH命令
@@ -767,28 +811,28 @@ sync_to_servers() {
         elif [ "$AUTH_TYPE" = "password" ]; then
             # 检查sshpass是否可用
             if ! command -v sshpass >/dev/null 2>&1; then
-                echo -e "${RED}错误：服务器 $SERVER_NAME 配置为密码认证，但sshpass未安装${NC}"
-                echo -e "${YELLOW}可以使用以下命令安装sshpass:${NC}"
-                echo -e "  Debian/Ubuntu: ${BLUE}sudo apt-get install sshpass${NC}"
-                echo -e "  CentOS/RHEL: ${BLUE}sudo yum install sshpass${NC}"
-                echo -e "  macOS: ${BLUE}brew install hudochenkov/sshpass/sshpass${NC}"
+                log_error "服务器 $SERVER_NAME 配置为密码认证，但sshpass未安装"
+                log_warn "可以使用以下命令安装sshpass:"
+                echo -e "  ${CYAN}Debian/Ubuntu:${NC} ${BLUE}sudo apt-get install sshpass${NC}"
+                echo -e "  ${CYAN}CentOS/RHEL:${NC} ${BLUE}sudo yum install sshpass${NC}"
+                echo -e "  ${CYAN}macOS:${NC} ${BLUE}brew install hudochenkov/sshpass/sshpass${NC}"
 
                 # 询问是否跳过此服务器
                 read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
                 if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
-                    echo -e "${YELLOW}跳过服务器 $SERVER_NAME${NC}"
+                    log_warn "跳过服务器 $SERVER_NAME"
                     continue
                 else
-                    echo -e "${RED}同步中止${NC}"
+                    log_error "同步中止"
 
                     # 恢复代理设置
                     if [ $HAS_PROXY -eq 1 ] && [ "$disable_proxy_choice" = "y" ]; then
-                        echo -e "${YELLOW}恢复代理设置...${NC}"
+                        log_info "恢复代理设置..."
                         export http_proxy=$BACKUP_HTTP_PROXY
                         export https_proxy=$BACKUP_HTTPS_PROXY
                         export all_proxy=$BACKUP_ALL_PROXY
                         export no_proxy=$BACKUP_NO_PROXY
-                        echo -e "${GREEN}代理设置已恢复${NC}"
+                        log_success "代理设置已恢复"
                     fi
 
                     exit 1
@@ -796,7 +840,7 @@ sync_to_servers() {
             fi
 
             # 测试SSH密码连接
-            echo -e "${YELLOW}测试SSH密码连接...${NC}"
+            log_info "测试 SSH 密码连接..."
             # 使用临时文件存储密码，避免在进程列表中暴露
             local temp_pass_file=$(mktemp)
             echo "$AUTH_INFO" > "$temp_pass_file"
@@ -805,21 +849,21 @@ sync_to_servers() {
             local ssh_result=$?
             rm -f "$temp_pass_file"
             if [ $ssh_result -ne 0 ]; then
-                echo -e "${RED}错误：SSH密码连接测试失败${NC}"
-                echo -e "${YELLOW}请确认以下信息:${NC}"
-                echo -e "1. ${YELLOW}服务器 $SERVER_HOSTNAME 是否可达${NC}"
-                echo -e "2. ${YELLOW}密码是否正确${NC}"
-                echo -e "3. ${YELLOW}服务器SSH配置是否允许密码认证${NC}"
-                echo -e "4. ${YELLOW}是否存在网络代理问题${NC}"
+                log_error "SSH 密码连接测试失败"
+                log_warn "请确认以下信息:"
+                echo -e "  1. ${CYAN}服务器 $SERVER_HOSTNAME 是否可达${NC}"
+                echo -e "  2. ${CYAN}密码是否正确${NC}"
+                echo -e "  3. ${CYAN}服务器SSH配置是否允许密码认证${NC}"
+                echo -e "  4. ${CYAN}是否存在网络代理问题${NC}"
 
                 # 询问是否跳过代理
                 read -p "是否尝试使用无代理模式连接? (y/n): " direct_conn_choice
                 if [ "$direct_conn_choice" = "y" ] || [ "$direct_conn_choice" = "Y" ]; then
-                    echo -e "${YELLOW}尝试直接连接...${NC}"
+                    log_info "用户选择尝试无代理模式直接连接 (密码认证)"
                     # 确保所有可能的代理变量都被清除
                     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-                    echo -e "${YELLOW}使用调试模式尝试SSH密码连接...${NC}"
+                    log_info "使用 -v 调试模式尝试 SSH 密码连接"
                     local temp_debug_pass_file=$(mktemp)
                     echo "$AUTH_INFO" > "$temp_debug_pass_file"
                     chmod 600 "$temp_debug_pass_file"
@@ -831,50 +875,50 @@ sync_to_servers() {
                     if [ "$force_sync_choice" != "y" ] && [ "$force_sync_choice" != "Y" ]; then
                         read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
                         if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
-                            echo -e "${YELLOW}跳过服务器 $SERVER_NAME${NC}"
+                            log_warn "跳过服务器 $SERVER_NAME"
                             continue
                         else
-                            echo -e "${RED}同步中止${NC}"
+                            log_error "用户选择中止同步"
 
                             # 恢复代理设置
                             if [ $HAS_PROXY -eq 1 ] && [ "$disable_proxy_choice" = "y" ]; then
-                                echo -e "${YELLOW}恢复代理设置...${NC}"
+                                log_info "恢复代理设置..."
                                 export http_proxy=$BACKUP_HTTP_PROXY
                                 export https_proxy=$BACKUP_HTTPS_PROXY
                                 export all_proxy=$BACKUP_ALL_PROXY
                                 export no_proxy=$BACKUP_NO_PROXY
-                                echo -e "${GREEN}代理设置已恢复${NC}"
+                                log_info "代理设置已恢复"
                             fi
 
                             exit 1
                         fi
                     else
-                        echo -e "${YELLOW}强制继续同步...${NC}"
+                        log_warn "强制继续同步..."
                     fi
                 else
                     # 询问是否跳过此服务器
                     read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
                     if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
-                        echo -e "${YELLOW}跳过服务器 $SERVER_NAME${NC}"
+                            log_warn "跳过服务器 $SERVER_NAME"
                         continue
                     else
-                        echo -e "${RED}同步中止${NC}"
+                        log_error "用户选择中止同步"
 
                         # 恢复代理设置
                         if [ $HAS_PROXY -eq 1 ] && [ "$disable_proxy_choice" = "y" ]; then
-                            echo -e "${YELLOW}恢复代理设置...${NC}"
+                            log_info "恢复代理设置..."
                             export http_proxy=$BACKUP_HTTP_PROXY
                             export https_proxy=$BACKUP_HTTPS_PROXY
                             export all_proxy=$BACKUP_ALL_PROXY
                             export no_proxy=$BACKUP_NO_PROXY
-                            echo -e "${GREEN}代理设置已恢复${NC}"
+                            log_info "代理设置已恢复"
                         fi
 
                         exit 1
                     fi
                 fi
             else
-                echo -e "${GREEN}SSH密码连接测试成功${NC}"
+                log_success "SSH 密码连接测试成功"
             fi
 
             # 创建临时密码文件用于rsync
@@ -883,16 +927,17 @@ sync_to_servers() {
             chmod 600 "$TEMP_RSYNC_PASS_FILE"
             RSYNC_SSH_OPTS="-e \"sshpass -f '$TEMP_RSYNC_PASS_FILE' ssh -o StrictHostKeyChecking=no\""
         else
-            echo -e "${RED}错误：服务器 $SERVER_NAME 的认证类型 $AUTH_TYPE 不支持，必须为 'ssh' 或 'password'${NC}"
+            log_error "服务器 $SERVER_NAME 的认证类型 $AUTH_TYPE 不支持，必须为 'ssh' 或 'password'"
             exit 1
         fi
 
         # 使用eval执行rsync命令，以便正确解析引号
         RSYNC_CMD="rsync $RSYNC_OPTIONS $RSYNC_SSH_OPTS $EXCLUDE_OPTS \"$LOCAL_DIR/\" \"$SERVER_HOST:$TARGET_DIR/\""
+        log_info "构造 rsync 命令: $RSYNC_CMD"
 
         if [ "$VERBOSE" = true ]; then
-            echo -e "${YELLOW}开始执行rsync同步...${NC}"
-            echo -e "${BLUE}执行命令: $RSYNC_CMD${NC}"
+            log_info "开始执行 rsync 同步（前台，详细模式）"
+            echo -e "${CYAN}执行命令:${NC} ${BLUE}$RSYNC_CMD${NC}"
             eval $RSYNC_CMD
             RSYNC_EXIT_CODE=$?
         else
@@ -915,6 +960,7 @@ sync_to_servers() {
 
             # 显示rsync统计信息
             if [ $RSYNC_EXIT_CODE -eq 0 ] && [ -f "$temp_rsync_output" ]; then
+                log_success "rsync 同步成功，输出最后三行："
                 tail -3 "$temp_rsync_output"
             fi
 
@@ -928,34 +974,34 @@ sync_to_servers() {
         fi
 
         if [ $RSYNC_EXIT_CODE -eq 0 ]; then
-            echo -e "${GREEN}服务器 $SERVER_NAME 同步成功${NC}"
+            log_success "服务器 $SERVER_NAME 同步成功"
 
             # 执行同步后命令（权限设置等）
             execute_post_sync_commands "$i"
         else
-            echo -e "${RED}服务器 $SERVER_NAME 同步失败 (错误代码: $RSYNC_EXIT_CODE)${NC}"
-            echo -e "${YELLOW}rsync错误代码参考:${NC}"
-            echo -e "${YELLOW}1-10: 通常是文件访问或权限错误${NC}"
-            echo -e "${YELLOW}11-20: 网络或连接错误${NC}"
-            echo -e "${YELLOW}23-24: 其他rsync错误${NC}"
-            echo -e "${YELLOW}30+: SSH或shell错误${NC}"
+            log_error "服务器 $SERVER_NAME 同步失败 (错误代码: $RSYNC_EXIT_CODE)"
+            log_warn "rsync错误代码参考:"
+            echo -e "  ${YELLOW}1-10:${NC} 通常是文件访问或权限错误"
+            echo -e "  ${YELLOW}11-20:${NC} 网络或连接错误"
+            echo -e "  ${YELLOW}23-24:${NC} 其他rsync错误"
+            echo -e "  ${YELLOW}30+:${NC} SSH或shell错误"
 
             # 询问是否继续同步其他服务器
             read -p "是否继续同步其他服务器? (y/n): " continue_choice
             if [ "$continue_choice" = "y" ] || [ "$continue_choice" = "Y" ]; then
-                echo -e "${YELLOW}继续同步其他服务器...${NC}"
+                log_warn "用户选择在当前错误后继续同步其他服务器"
                 continue
             else
-                echo -e "${RED}同步中止${NC}"
+                log_error "用户选择中止同步"
 
                 # 恢复代理设置
                 if [ $HAS_PROXY -eq 1 ] && [ "$disable_proxy_choice" = "y" ]; then
-                    echo -e "${YELLOW}恢复代理设置...${NC}"
+                    log_info "恢复代理设置..."
                     export http_proxy=$BACKUP_HTTP_PROXY
                     export https_proxy=$BACKUP_HTTPS_PROXY
                     export all_proxy=$BACKUP_ALL_PROXY
                     export no_proxy=$BACKUP_NO_PROXY
-                    echo -e "${GREEN}代理设置已恢复${NC}"
+                    log_info "代理设置已恢复"
                 fi
 
                 exit 1
@@ -963,16 +1009,16 @@ sync_to_servers() {
         fi
     done
 
-    echo -e "${GREEN}所有服务器同步完成${NC}"
+    log_success "所有服务器同步完成"
 
     # 恢复代理设置
     if [ $HAS_PROXY -eq 1 ] && [ "$disable_proxy_choice" = "y" ]; then
-        echo -e "${YELLOW}恢复代理设置...${NC}"
+        log_info "恢复代理设置..."
         export http_proxy=$BACKUP_HTTP_PROXY
         export https_proxy=$BACKUP_HTTPS_PROXY
         export all_proxy=$BACKUP_ALL_PROXY
         export no_proxy=$BACKUP_NO_PROXY
-        echo -e "${GREEN}代理设置已恢复${NC}"
+        log_info "代理设置已恢复"
     fi
 }
 
@@ -980,7 +1026,7 @@ sync_to_servers() {
 execute_post_sync_commands() {
     local server_index=$1
 
-    echo -e "${YELLOW}执行同步后命令...${NC}"
+    log_info "执行同步后命令 (server_index=$server_index)..."
 
     # 获取服务器信息
     if command -v yq >/dev/null 2>&1; then
@@ -992,19 +1038,26 @@ execute_post_sync_commands() {
         AUTH_INFO=$(yq e ".server_groups[$GROUP_INDEX].servers[$server_index].auth_info" "$CONFIG_FILE")
 
         # 获取命令列表（按优先级：服务器级别 > 服务器组级别 > 全局默认）
-        SERVER_COMMANDS=$(yq e ".server_groups[$GROUP_INDEX].servers[$server_index].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
-        if [ -n "$SERVER_COMMANDS" ]; then
-            # 使用服务器级别的命令
-            COMMANDS="$SERVER_COMMANDS"
-        else
-            # 尝试使用服务器组级别的命令
-            GROUP_COMMANDS=$(yq e ".server_groups[$GROUP_INDEX].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
-            if [ -n "$GROUP_COMMANDS" ]; then
-                COMMANDS="$GROUP_COMMANDS"
-            else
-                # 使用全局默认命令
-                COMMANDS=$(yq e ".default_post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
-            fi
+        # 这里改为使用数组存储命令，避免某些环境下多行字符串/管道读取导致只执行部分命令
+        COMMAND_LIST=()
+
+        # 服务器级别命令
+        while IFS= read -r line; do
+            [ -n "$line" ] && COMMAND_LIST+=("$line")
+        done < <(yq e ".server_groups[$GROUP_INDEX].servers[$server_index].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
+
+        # 如果服务器级别没有配置，再尝试服务器组级别
+        if [ ${#COMMAND_LIST[@]} -eq 0 ]; then
+            while IFS= read -r line; do
+                [ -n "$line" ] && COMMAND_LIST+=("$line")
+            done < <(yq e ".server_groups[$GROUP_INDEX].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
+        fi
+
+        # 如果服务器组级别也没有，再使用全局默认命令
+        if [ ${#COMMAND_LIST[@]} -eq 0 ]; then
+            while IFS= read -r line; do
+                [ -n "$line" ] && COMMAND_LIST+=("$line")
+            done < <(yq e ".default_post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
         fi
 
         # 展开路径中的~
@@ -1013,31 +1066,31 @@ execute_post_sync_commands() {
         fi
     else
         # 使用Python解析（简化版本，主要支持yq）
-        echo -e "${YELLOW}建议安装yq以获得完整的post_sync_commands支持${NC}"
+        log_warn "未安装 yq，post_sync_commands 仅部分支持，建议安装 yq"
         return
     fi
 
     # 如果没有配置任何命令，跳过
-    if [ -z "$COMMANDS" ]; then
-        echo -e "${YELLOW}未配置同步后命令，跳过权限设置${NC}"
+    if [ ${#COMMAND_LIST[@]} -eq 0 ]; then
+        log_warn "未配置任何同步后命令，跳过权限/扩展操作"
         return
     fi
 
-    echo -e "${YELLOW}找到同步后命令，准备显示...${NC}"
+    log_info "找到同步后命令 ${#COMMAND_LIST[@]} 条，准备显示并执行"
 
     # 预处理命令并显示
-    echo -e "${BLUE}========== 待执行的同步后命令 ==========${NC}"
+    echo -e "${CYAN}========== 待执行的同步后命令 ==========${NC}"
     local cmd_count=0
 
-    while IFS= read -r command; do
+    for command in "${COMMAND_LIST[@]}"; do
         if [ -n "$command" ]; then
             cmd_count=$((cmd_count + 1))
             # 变量替换
             processed_command=$(echo "$command" | sed "s|{target_dir}|$TARGET_DIR|g" | sed "s|{server_name}|$SERVER_NAME|g" | sed "s|{branch}|$SERVER_BRANCH|g")
             echo -e "${CYAN}[$cmd_count] $processed_command${NC}"
         fi
-    done <<< "$COMMANDS"
-    echo -e "${BLUE}=========================================${NC}"
+    done
+    echo -e "${CYAN}=========================================${NC}"
 
     # 询问用户执行方式
     echo -e "${YELLOW}请选择执行方式：${NC}"
@@ -1048,13 +1101,13 @@ execute_post_sync_commands() {
 
     case "$execute_mode" in
         1)
-            echo -e "${GREEN}将执行所有命令...${NC}"
+            log_info "用户选择模式: 执行所有命令"
             ;;
         2)
-            echo -e "${GREEN}将逐个确认执行...${NC}"
+            log_info "用户选择模式: 逐个确认执行"
             ;;
         3|*)
-            echo -e "${YELLOW}跳过同步后命令执行${NC}"
+            log_warn "用户选择跳过所有同步后命令"
             return
             ;;
     esac
@@ -1063,7 +1116,7 @@ execute_post_sync_commands() {
     local cmd_index=0
     local should_break=false
 
-    while IFS= read -r command; do
+    for command in "${COMMAND_LIST[@]}"; do
         if [ -n "$command" ]; then
             cmd_index=$((cmd_index + 1))
             # 变量替换
@@ -1075,21 +1128,21 @@ execute_post_sync_commands() {
                 read -p "是否执行此命令? (y/n/q): " cmd_choice
                 case "$cmd_choice" in
                     y|Y)
-                        echo -e "${GREEN}执行命令...${NC}"
+                        log_info "执行命令 [$cmd_index]"
                         ;;
                     q|Q)
-                        echo -e "${YELLOW}用户选择退出，停止执行后续命令${NC}"
+                        log_warn "用户选择退出，停止执行后续命令"
                         should_break=true
                         break
                         ;;
                     *)
-                        echo -e "${YELLOW}跳过此命令${NC}"
+                        log_warn "用户选择跳过命令 [$cmd_index]"
                         continue
                         ;;
                 esac
             fi
 
-            echo -e "${BLUE}执行命令 [$cmd_index]: $processed_command${NC}"
+            echo -e "${CYAN}执行命令 [$cmd_index]:${NC} ${BLUE}$processed_command${NC}"
 
             # 根据认证类型执行远程命令
             if [ "$AUTH_TYPE" = "ssh" ]; then
@@ -1103,22 +1156,22 @@ execute_post_sync_commands() {
             fi
 
             if [ $? -eq 0 ]; then
-                echo -e "${GREEN}命令 [$cmd_index] 执行成功${NC}"
+                log_success "命令 [$cmd_index] 执行成功"
             else
-                echo -e "${RED}命令 [$cmd_index] 执行失败${NC}"
+                log_error "命令 [$cmd_index] 执行失败"
                 if [ "$execute_mode" = "1" ]; then
                     read -p "是否继续执行其他命令? (y/n): " continue_cmd_choice
                     if [ "$continue_cmd_choice" != "y" ] && [ "$continue_cmd_choice" != "Y" ]; then
-                        echo -e "${YELLOW}停止执行后续命令${NC}"
+                        log_warn "用户选择在命令失败后停止执行后续命令"
                         should_break=true
                         break
                     fi
                 fi
             fi
         fi
-    done <<< "$COMMANDS"
+    done
 
-    echo -e "${GREEN}同步后命令执行完成${NC}"
+    log_success "同步后命令执行完成"
 }
 
 # 清理敏感凭据
@@ -1141,14 +1194,14 @@ cleanup_credentials() {
     # 清除SSH命令中的敏感信息
     unset GIT_SSH_COMMAND
 
-    echo -e "${GREEN}凭据清理完成${NC}"
+    log_success "凭据清理完成"
 }
 
 # 主函数
 main() {
-    echo -e "${BLUE}=========================================${NC}"
-    echo -e "${BLUE}       Gitee代码同步工具 v1.0          ${NC}"
-    echo -e "${BLUE}=========================================${NC}"
+    echo -e "${CYAN}=========================================${NC}"
+    echo -e "${CYAN}       Gitee代码同步工具 v1.0          ${NC}"
+    echo -e "${CYAN}=========================================${NC}"
 
     check_dependencies
     select_config_file
@@ -1159,8 +1212,9 @@ main() {
     sync_to_servers
     cleanup_credentials
 
-    echo -e "${GREEN}任务完成！所有代码已成功同步到目标服务器${NC}"
-    echo -e "${BLUE}=========================================${NC}"
+    echo -e "${CYAN}=========================================${NC}"
+    log_success "任务完成！所有代码已成功同步到目标服务器"
+    echo -e "${CYAN}=========================================${NC}"
 }
 
 # 执行主函数
