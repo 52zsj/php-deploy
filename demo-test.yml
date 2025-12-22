@@ -1,0 +1,77 @@
+# 测试配置文件示例
+# 用于测试交互式命令和滚动显示效果
+
+gitee:
+  repo_url: https://gitee.com/example/test-project.git
+  default_branch: master
+  local_dir: /tmp/test-sync
+  auth_type: ssh
+  ssh_key: ~/.ssh/id_rsa
+
+sync:
+  rsync_options: -az --delete --progress
+  exclude:
+    - .git
+    - .gitignore
+    - node_modules
+    - vendor
+    - "*.log"
+
+server_groups:
+  - name: 本地测试环境
+    env: test
+    servers:
+      - name: 本地测试
+        host: localhost
+        target_dir: /tmp/test-target
+        branch: master
+        auth_type: ssh
+        auth_info: ~/.ssh/id_rsa
+        
+        # 同步后命令 - 测试各种场景
+        post_sync_commands:
+          # 1. 快速命令（瞬间完成）
+          - echo "=== 开始执行同步后命令 ==="
+          - pwd
+          - whoami
+          - date
+          
+          # 2. 普通命令（快速完成，少量输出）
+          - ls -la {target_dir}
+          - du -sh {target_dir}
+          
+          # 3. 长时间运行的命令（测试滚动显示）
+          - for i in {1..30}; do echo "处理文件 $i/30"; sleep 0.2; done
+          
+          # 4. 模拟编译过程（大量输出）
+          - for i in {1..50}; do echo "编译: src/module_$i.c -> obj/module_$i.o"; sleep 0.1; done
+          
+          # 5. 运行本地测试脚本（如果存在）
+          # 注意：这会调用 test_interactive.sh，包含交互式测试
+          # - bash /Users/mac/kuhou/other/php-deploy/test_interactive.sh
+          
+          # 6. 文件权限设置（实际部署常用）
+          - chmod -R 755 {target_dir}
+          
+          # 7. 最终确认
+          - echo "=== 所有命令执行完成 ==="
+          - echo "目标目录: {target_dir}"
+          - echo "服务器: {server_name}"
+          - echo "分支: {branch}"
+
+# 使用说明：
+# 
+# 1. 确保 ~/.ssh/id_rsa 存在（或修改为你的密钥路径）
+# 2. 运行: ./sync.sh
+# 3. 选择这个配置文件
+# 4. 选择 "本地测试环境"
+# 5. 选择执行方式（建议选 1 - 执行所有命令）
+# 6. 观察滚动显示效果
+#
+# 测试要点：
+# - 快速命令应该瞬间完成
+# - 长时间命令会显示灰色滚动输出
+# - 完成后滚动区域会自动消失
+# - 最终只显示简洁的状态信息
+# - 查看日志文件：logs/demo-test/sync_$(date +%Y-%m-%d).log
+
