@@ -16,30 +16,24 @@ gitee:
 
 # 同步选项
 sync:
-  # rsync选项
-  rsync_options: "-az --delete --progress"
-  # 排除文件和目录
+  rsync_options: "-az --progress"
+  
+  # 排除目录（删除操作时会跳过）
   exclude:
     - ".git"
-    - ".gitignore"
     - "node_modules"
     - "vendor"
     - "*.log"
-    # 保护运行时目录和文件
     - "runtime/"
     - "logs/"
-    - "log/"
     - "uploads/"
-    - "upload/"
     - "storage/"
     - "cache/"
     - "temp/"
-    - "tmp/"
     - "data/"
-    - "backup/"
     - "*.pid"
     - "*.lock"
-    - "*.tmp"
+  
   # 配置替换目录
   replace_dir: "~/replace/demo"
 

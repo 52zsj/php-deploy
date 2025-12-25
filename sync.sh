@@ -10,10 +10,15 @@
 VERBOSE=false
 LOG_FILE=""
 QUIET_MODE=false
+FORCE_SYNC=false
 for arg in "$@"; do
     case $arg in
         -v|--verbose)
             VERBOSE=true
+            shift
+            ;;
+        -f|--force)
+            FORCE_SYNC=true
             shift
             ;;
         -q|--quiet)
@@ -28,6 +33,7 @@ for arg in "$@"; do
             echo "用法: $0 [选项]"
             echo "选项:"
             echo "  -v, --verbose        显示详细输出"
+            echo "  -f, --force          强制同步所有 Git 管理的文件"
             echo "  -q, --quiet          精简模式，详细日志写入文件"
             echo "  --log=/path/file     将关键日志额外写入到指定文件"
             echo "  -h, --help           显示帮助信息"
@@ -43,8 +49,9 @@ for arg in "$@"; do
     esac
 done
 
-# 设置严格模式
-set -e
+# 注意：不使用 set -e，因为它会导致脚本在复杂场景下意外退出
+# 我们使用显式的错误检查来处理关键命令
+# set -e
 
 # 颜色定义（统一颜色方案）
 RED='\033[0;31m'      # 错误/失败
@@ -121,9 +128,10 @@ log_info() {
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     
-    # 写入文件日志
+    # 写入文件日志（去除颜色代码）
     if [ -n "$LOG_FILE" ]; then
-        echo "[${ts}] [INFO] $msg" >> "$LOG_FILE"
+        local clean_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g')
+        echo "[${ts}] [INFO] $clean_msg" >> "$LOG_FILE"
     fi
     
     # 控制台输出（精简模式下跳过某些信息）
@@ -137,9 +145,10 @@ log_success() {
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     
-    # 写入文件日志
+    # 写入文件日志（去除颜色代码）
     if [ -n "$LOG_FILE" ]; then
-        echo "[${ts}] [SUCCESS] $msg" >> "$LOG_FILE"
+        local clean_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g')
+        echo "[${ts}] [SUCCESS] $clean_msg" >> "$LOG_FILE"
     fi
     
     # 控制台输出（精简模式下始终显示成功信息）
@@ -151,9 +160,10 @@ log_warn() {
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     
-    # 写入文件日志
+    # 写入文件日志（去除颜色代码）
     if [ -n "$LOG_FILE" ]; then
-        echo "[${ts}] [WARN] $msg" >> "$LOG_FILE"
+        local clean_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g')
+        echo "[${ts}] [WARN] $clean_msg" >> "$LOG_FILE"
     fi
     
     # 控制台输出（始终显示警告）
@@ -165,9 +175,10 @@ log_error() {
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     
-    # 写入文件日志
+    # 写入文件日志（去除颜色代码）
     if [ -n "$LOG_FILE" ]; then
-        echo "[${ts}] [ERROR] $msg" >> "$LOG_FILE"
+        local clean_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g')
+        echo "[${ts}] [ERROR] $clean_msg" >> "$LOG_FILE"
     fi
     
     # 控制台输出（始终显示错误）
@@ -495,6 +506,8 @@ EOF
         echo "" >> "$LOG_FILE"
     fi
     
+    log_info "同步策略: ${CYAN}Git 为真相源${NC} (只操作 Git 管理的文件)"
+    
     echo -e "  ${GREEN}[✓]${NC} 配置解析完成"
     echo ""
 }
@@ -610,7 +623,7 @@ pull_code() {
 
     # 确保本地目录存在
     mkdir -p "$LOCAL_DIR"
-
+    
     # 收集所有需要的分支
     REQUIRED_BRANCHES=("$DEFAULT_BRANCH")
 
@@ -652,6 +665,12 @@ print(' '.join(branches))
             if [ -n "$LOG_FILE" ]; then
                 echo "  更新分支: $branch" >> "$LOG_FILE"
             fi
+            
+            # 记录当前提交，用于检测变更
+            local old_commit=""
+            if git rev-parse --verify "$branch" >/dev/null 2>&1; then
+                old_commit=$(git rev-parse "$branch")
+            fi
 
             # 切换分支
             if [ "$VERBOSE" = true ]; then
@@ -665,6 +684,71 @@ print(' '.join(branches))
 
             # 拉取更新
             safe_git_command "正在拉取分支 $branch 的最新代码" "pull" "origin" "$branch"
+            
+            # 检测 Git 变更（详细类型：A/M/D）
+            local new_commit=$(git rev-parse HEAD)
+            if [ -n "$old_commit" ] && [ "$old_commit" != "$new_commit" ]; then
+                # 使用 --name-status 获取变更类型
+                local git_changes=$(git diff --name-status "$old_commit" "$new_commit")
+                
+                # 分类存储
+                local added_files=()
+                local modified_files=()
+                local deleted_files=()
+                
+                while IFS=$'\t' read -r status file; do
+                    if [ -n "$file" ]; then
+                        case "$status" in
+                            A)  added_files+=("$file") ;;
+                            M)  modified_files+=("$file") ;;
+                            D)  deleted_files+=("$file") ;;
+                        esac
+                    fi
+                done <<< "$git_changes"
+                
+                # 存储到全局变量（使用变量名拼接，兼容 bash 3.2）
+                # 将分支名中的特殊字符替换为下划线
+                local branch_var=$(echo "$branch" | sed 's/[^a-zA-Z0-9_]/_/g')
+                eval "CHANGED_FILES_${branch_var}_added=\"${added_files[*]}\""
+                eval "CHANGED_FILES_${branch_var}_modified=\"${modified_files[*]}\""
+                eval "CHANGED_FILES_${branch_var}_deleted=\"${deleted_files[*]}\""
+                
+                # 显示统计
+                echo -e "  ${CYAN}[i]${NC} 分支 ${CYAN}$branch${NC} 变更统计:"
+                [ ${#added_files[@]} -gt 0 ] && echo -e "    新增: ${GREEN}${#added_files[@]}${NC} 个文件"
+                [ ${#modified_files[@]} -gt 0 ] && echo -e "    修改: ${YELLOW}${#modified_files[@]}${NC} 个文件"
+                [ ${#deleted_files[@]} -gt 0 ] && echo -e "    删除: ${RED}${#deleted_files[@]}${NC} 个文件"
+                
+                # 写入日志
+                if [ -n "$LOG_FILE" ]; then
+                    echo "  分支 $branch 变更详情:" >> "$LOG_FILE"
+                    if [ ${#added_files[@]} -gt 0 ]; then
+                        echo "    新增文件:" >> "$LOG_FILE"
+                        for file in "${added_files[@]}"; do
+                            echo "      + $file" >> "$LOG_FILE"
+                        done
+                    fi
+                    if [ ${#modified_files[@]} -gt 0 ]; then
+                        echo "    修改文件:" >> "$LOG_FILE"
+                        for file in "${modified_files[@]}"; do
+                            echo "      M $file" >> "$LOG_FILE"
+                        done
+                    fi
+                    if [ ${#deleted_files[@]} -gt 0 ]; then
+                        echo "    删除文件:" >> "$LOG_FILE"
+                        for file in "${deleted_files[@]}"; do
+                            echo "      - $file" >> "$LOG_FILE"
+                        done
+                    fi
+                fi
+            else
+                # 无变更，清空变量
+                local branch_var=$(echo "$branch" | sed 's/[^a-zA-Z0-9_]/_/g')
+                eval "CHANGED_FILES_${branch_var}_added=\"\""
+                eval "CHANGED_FILES_${branch_var}_modified=\"\""
+                eval "CHANGED_FILES_${branch_var}_deleted=\"\""
+                echo -e "  ${YELLOW}[!]${NC} 分支 $branch 无变更"
+            fi
         done
 
         echo -e "  ${GREEN}[✓]${NC} 代码更新完成 (${#REQUIRED_BRANCHES[@]} 个分支)"
@@ -690,9 +774,13 @@ print(' '.join(branches))
                 fi
                 git checkout -b "$branch" "origin/$branch" >> "$LOG_FILE" 2>&1
             fi
+            # 首次克隆，标记为首次同步
+            local branch_var=$(echo "$branch" | sed 's/[^a-zA-Z0-9_]/_/g')
+            eval "CHANGED_FILES_${branch_var}_first_clone=\"true\""
         done
 
         echo -e "  ${GREEN}[✓]${NC} 代码克隆完成 (${#REQUIRED_BRANCHES[@]} 个分支)"
+        echo -e "  ${CYAN}[i]${NC} 首次克隆，将使用智能比对同步文件"
         
         if [ -n "$LOG_FILE" ]; then
             echo "克隆的分支: ${REQUIRED_BRANCHES[*]}" >> "$LOG_FILE"
@@ -705,6 +793,9 @@ print(' '.join(branches))
 # 替换环境配置文件
 replace_configs() {
     echo -e "${BLUE}[→]${NC} 替换环境配置..."
+    
+    # 初始化替换文件列表
+    REPLACED_FILES=()
 
     # 获取替换目录和环境标识
     if command -v yq >/dev/null 2>&1; then
@@ -742,23 +833,93 @@ replace_configs() {
     # 切换到正确的分支
     cd "$LOCAL_DIR"
 
-    # 递归替换文件
+    # 递归替换文件（只替换有变更的文件）
     if [ "$VERBOSE" = true ]; then
-        # 详细模式：显示每个文件
-        find "$REPLACE_DIR" -type f -print | while read replace_file; do
+        # 详细模式：滚动显示最近 10 个文件
+        local temp_files=$(mktemp)
+        local temp_processed=$(mktemp)
+        find "$REPLACE_DIR" -type f -print > "$temp_files"
+        local total_count=$(wc -l < "$temp_files" | tr -d ' ')
+        local current_count=0
+        local replaced_count=0
+        local skipped_count=0
+        local display_lines=10
+        
+        # 预留显示空间
+        local actual_lines=$((total_count < display_lines ? total_count : display_lines))
+        for ((j=0; j<$actual_lines; j++)); do
+            echo ""
+        done
+        
+        while IFS= read -r replace_file; do
             rel_path="${replace_file#$REPLACE_DIR/}"
             target_file="$LOCAL_DIR/$rel_path"
             target_dir=$(dirname "$target_file")
+            current_count=$((current_count + 1))
 
             if [ ! -d "$target_dir" ]; then
                 mkdir -p "$target_dir"
             fi
 
-            cp -f "$replace_file" "$target_file"
-            echo -e "  ${GREEN}[✓]${NC} $rel_path"
+            # 检查文件是否需要替换（内容比对）
+            local need_replace=true
+            if [ -f "$target_file" ]; then
+                # 使用 cmp 比较文件内容
+                if cmp -s "$replace_file" "$target_file"; then
+                    need_replace=false
+                    skipped_count=$((skipped_count + 1))
+                fi
+            fi
+            
+            if [ "$need_replace" = true ]; then
+                cp -f "$replace_file" "$target_file"
+                REPLACED_FILES+=("$rel_path")
+                replaced_count=$((replaced_count + 1))
+                echo "✓ $rel_path" >> "$temp_processed"
+            else
+                echo "→ $rel_path (无变更)" >> "$temp_processed"
+            fi
+            
+            # 向上移动光标到显示区域
+            for ((j=0; j<$actual_lines; j++)); do
+                printf "\033[1A"
+            done
+            
+            # 显示最近的文件
+            tail -n $display_lines "$temp_processed" | while IFS= read -r show_line; do
+                if [[ "$show_line" == "✓ "* ]]; then
+                    local show_file="${show_line#✓ }"
+                    printf "\033[2K  ${GREEN}[✓]${NC} ${GRAY}%s${NC}\n" "$show_file"
+                else
+                    local show_file="${show_line#→ }"
+                    printf "\033[2K  ${YELLOW}[→]${NC} ${GRAY}%s${NC}\n" "$show_file"
+                fi
+            done
+            
+            # 补齐空行（如果还没有足够的文件）
+            local shown=$(tail -n $display_lines "$temp_processed" | wc -l | tr -d ' ')
+            for ((j=$shown; j<$actual_lines; j++)); do
+                printf "\033[2K\n"
+            done
+        done < "$temp_files"
+        
+        # 清除滚动显示区域
+        for ((j=0; j<$actual_lines; j++)); do
+            printf "\033[1A\033[2K"
         done
+        
+        # 显示完成信息
+        if [ $skipped_count -gt 0 ]; then
+            echo -e "  ${GREEN}[✓]${NC} 替换 ${CYAN}${replaced_count}${NC} 个文件，跳过 ${YELLOW}${skipped_count}${NC} 个无变更文件"
+        else
+            echo -e "  ${GREEN}[✓]${NC} 已替换 ${CYAN}${replaced_count}${NC} 个文件"
+        fi
+        rm -f "$temp_files" "$temp_processed"
     else
-        # 精简模式：后台执行并显示进度
+        # 精简模式：后台执行并显示进度（只替换有变更的文件）
+        local temp_replaced_list=$(mktemp)
+        local temp_skipped_list=$(mktemp)
+        
         replace_config_files_background() {
             find "$REPLACE_DIR" -type f -print | while read replace_file; do
                 rel_path="${replace_file#$REPLACE_DIR/}"
@@ -769,7 +930,19 @@ replace_configs() {
                     mkdir -p "$target_dir"
                 fi
 
-                cp -f "$replace_file" "$target_file"
+                # 检查文件是否需要替换（内容比对）
+                local need_replace=true
+                if [ -f "$target_file" ]; then
+                    if cmp -s "$replace_file" "$target_file"; then
+                        need_replace=false
+                        echo "$rel_path" >> "$temp_skipped_list"
+                    fi
+                fi
+                
+                if [ "$need_replace" = true ]; then
+                    cp -f "$replace_file" "$target_file"
+                    echo "$rel_path" >> "$temp_replaced_list"
+                fi
             done
         }
 
@@ -780,13 +953,32 @@ replace_configs() {
         # 显示进度
         show_progress "  替换配置文件" "$replace_pid"
         wait "$replace_pid"
+        
+        # 读取替换文件列表
+        while IFS= read -r file; do
+            [ -n "$file" ] && REPLACED_FILES+=("$file")
+        done < "$temp_replaced_list"
+        
+        # 统计数量
+        local replaced_count=${#REPLACED_FILES[@]}
+        local skipped_count=$(wc -l < "$temp_skipped_list" 2>/dev/null | tr -d ' ' || echo "0")
+        rm -f "$temp_replaced_list" "$temp_skipped_list"
 
-        # 统计替换的文件数量
-        local total_files=$(find "$REPLACE_DIR" -type f | wc -l | tr -d ' ')
-        echo -e "  ${GREEN}[✓]${NC} 已替换 ${CYAN}${total_files}${NC} 个文件"
+        # 显示结果
+        if [ "$skipped_count" -gt 0 ]; then
+            echo -e "  ${GREEN}[✓]${NC} 替换 ${CYAN}${replaced_count}${NC} 个文件，跳过 ${YELLOW}${skipped_count}${NC} 个无变更文件"
+        else
+            echo -e "  ${GREEN}[✓]${NC} 已替换 ${CYAN}${replaced_count}${NC} 个文件"
+        fi
         
         if [ -n "$LOG_FILE" ]; then
-            echo "  替换文件数: $total_files" >> "$LOG_FILE"
+            echo "  替换文件数: $replaced_count (跳过: $skipped_count)" >> "$LOG_FILE"
+            if [ $replaced_count -gt 0 ]; then
+                echo "  替换文件列表:" >> "$LOG_FILE"
+                for file in "${REPLACED_FILES[@]}"; do
+                    echo "    - $file" >> "$LOG_FILE"
+                done
+            fi
             echo "" >> "$LOG_FILE"
         fi
     fi
@@ -871,9 +1063,9 @@ sync_to_servers() {
         # 切换到正确的分支
         cd "$LOCAL_DIR"
         if [ "$VERBOSE" = true ]; then
-            git checkout "$SERVER_BRANCH"
+            git checkout "$SERVER_BRANCH" || true  # 忽略错误，避免 set -e 导致退出
         else
-            safe_git_command "正在切换到目标分支 $SERVER_BRANCH" "checkout" "$SERVER_BRANCH"
+            safe_git_command "正在切换到目标分支 $SERVER_BRANCH" "checkout" "$SERVER_BRANCH" || true
         fi
 
         # 提取主机名（不包含用户名）用于连接测试
@@ -1018,17 +1210,23 @@ sync_to_servers() {
                 fi
             fi
 
-            # 测试SSH密码连接（静默测试）
+            # 测试SSH密码连接
             if [ -n "$LOG_FILE" ]; then
                 echo "  测试SSH密码连接..." >> "$LOG_FILE"
             fi
-            # 使用临时文件存储密码，避免在进程列表中暴露
-            local temp_pass_file=$(mktemp)
-            echo "$AUTH_INFO" > "$temp_pass_file"
-            chmod 600 "$temp_pass_file"
-            sshpass -f "$temp_pass_file" ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$SERVER_HOST" "echo 连接成功" >/dev/null 2>&1
-            local ssh_result=$?
-            rm -f "$temp_pass_file"
+            
+            # 直接使用 -p 参数传递密码（更可靠）
+            if [ "$VERBOSE" = true ]; then
+                echo -e "  ${CYAN}[DEBUG]${NC} 测试 SSH 连接到 $SERVER_HOST..."
+                echo -e "  ${CYAN}[DEBUG]${NC} 密码长度: ${#AUTH_INFO} 字符"
+                echo -e "  ${CYAN}[DEBUG]${NC} 密码前3字符: ${AUTH_INFO:0:3}***"
+                sshpass -p "$AUTH_INFO" ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "echo 连接成功"
+                local ssh_result=$?
+                echo -e "  ${CYAN}[DEBUG]${NC} SSH 返回码: $ssh_result"
+            else
+                sshpass -p "$AUTH_INFO" ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "echo 连接成功" >/dev/null 2>&1
+                local ssh_result=$?
+            fi
             if [ $ssh_result -ne 0 ]; then
                 log_error "SSH 密码连接测试失败"
                 log_warn "请确认以下信息:"
@@ -1048,7 +1246,7 @@ sync_to_servers() {
                     local temp_debug_pass_file=$(mktemp)
                     echo "$AUTH_INFO" > "$temp_debug_pass_file"
                     chmod 600 "$temp_debug_pass_file"
-                    sshpass -f "$temp_debug_pass_file" ssh -v -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$SERVER_HOST" "echo 调试模式连接成功" 2>&1
+                    sshpass -f "$temp_debug_pass_file" ssh -v -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "echo 调试模式连接成功" 2>&1
                     rm -f "$temp_debug_pass_file"
 
                     # 询问是否仍然尝试同步
@@ -1108,36 +1306,214 @@ sync_to_servers() {
             TEMP_RSYNC_PASS_FILE=$(mktemp)
             echo "$AUTH_INFO" > "$TEMP_RSYNC_PASS_FILE"
             chmod 600 "$TEMP_RSYNC_PASS_FILE"
-            RSYNC_SSH_OPTS="-e \"sshpass -f '$TEMP_RSYNC_PASS_FILE' ssh -o StrictHostKeyChecking=no\""
+            RSYNC_SSH_OPTS="-e \"sshpass -f '$TEMP_RSYNC_PASS_FILE' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\""
         else
             log_error "服务器 $SERVER_NAME 的认证类型 $AUTH_TYPE 不支持，必须为 'ssh' 或 'password'"
             exit 1
         fi
 
-        # 使用eval执行rsync命令，以便正确解析引号
-        RSYNC_CMD="rsync $RSYNC_OPTIONS $RSYNC_SSH_OPTS $EXCLUDE_OPTS \"$LOCAL_DIR/\" \"$SERVER_HOST:$TARGET_DIR/\""
+        # ========================================
+        # 智能同步策略：以 Git 为真相源
+        # ========================================
         
-        # 写入简要信息到日志（不包含详细输出）
-        if [ -n "$LOG_FILE" ]; then
-            echo "  开始rsync同步..." >> "$LOG_FILE"
+        # 初始化删除文件列表（避免未定义错误）
+        DELETED_FILES_LIST=()
+        
+        # 1. 获取当前分支的变更（使用变量名拼接，兼容 bash 3.2）
+        local branch_var=$(echo "$SERVER_BRANCH" | sed 's/[^a-zA-Z0-9_]/_/g')
+        local is_first_clone=""
+        local added_files=""
+        local modified_files=""
+        local deleted_files=""
+        
+        eval "is_first_clone=\${CHANGED_FILES_${branch_var}_first_clone}"
+        eval "added_files=\${CHANGED_FILES_${branch_var}_added}"
+        eval "modified_files=\${CHANGED_FILES_${branch_var}_modified}"
+        eval "deleted_files=\${CHANGED_FILES_${branch_var}_deleted}"
+        
+        # 2. 准备需要同步的文件列表（Git 新增/修改 + Replace 替换）
+        local files_to_upload=()
+        
+        if [ "$VERBOSE" = true ]; then
+            echo -e "  ${CYAN}[DEBUG]${NC} REPLACED_FILES 数量: ${#REPLACED_FILES[@]}"
+            echo -e "  ${CYAN}[DEBUG]${NC} added_files: '$added_files'"
+            echo -e "  ${CYAN}[DEBUG]${NC} modified_files: '$modified_files'"
+            echo -e "  ${CYAN}[DEBUG]${NC} deleted_files: '$deleted_files'"
+            echo -e "  ${CYAN}[DEBUG]${NC} is_first_clone: '$is_first_clone'"
+        fi
+        
+        # 添加 Git 新增的文件
+        if [ -n "$added_files" ]; then
+            for file in $added_files; do
+                [ -n "$file" ] && files_to_upload+=("$file")
+            done
+        fi
+        
+        # 添加 Git 修改的文件
+        if [ -n "$modified_files" ]; then
+            for file in $modified_files; do
+                [ -n "$file" ] && files_to_upload+=("$file")
+            done
+        fi
+        
+        # 添加 Replace 替换的文件（优先级最高，可能覆盖 Git 变更）
+        for replaced_file in "${REPLACED_FILES[@]}"; do
+            # 检查是否已在列表中
+            local found=false
+            for existing_file in "${files_to_upload[@]}"; do
+                if [ "$existing_file" = "$replaced_file" ]; then
+                    found=true
+                    break
+                fi
+            done
+            if [ "$found" = false ]; then
+                files_to_upload+=("$replaced_file")
+            fi
+        done
+        
+        # 3. 判断同步策略
+        if [ "$FORCE_SYNC" = true ]; then
+            # 强制同步：使用智能比对同步所有 Git 文件
+            echo -e "  ${CYAN}[i]${NC} 强制同步模式，使用智能比对同步所有 Git 管理的文件"
+            
+            # 切换到本地目录
+            cd "$LOCAL_DIR"
+            
+            # 获取当前分支的所有 Git 文件
+            git checkout "$SERVER_BRANCH" >/dev/null 2>&1 || true
+            local all_git_files=$(git ls-files)
+            
+            # 创建文件列表
+            local temp_file_list=$(mktemp)
+            echo "$all_git_files" > "$temp_file_list"
+            
+            # 添加 Replace 替换的文件
+            for replaced_file in "${REPLACED_FILES[@]}"; do
+                echo "$replaced_file" >> "$temp_file_list"
+            done
+            
+            # 使用 rsync --checksum 智能比对，只上传有差异的文件
+            echo -e "  ${YELLOW}[→]${NC} 智能比对中..."
+            
+            if [ -n "$LOG_FILE" ]; then
+                echo "  强制同步模式，智能比对同步" >> "$LOG_FILE"
+            fi
+            
+            # 统计文件数量
+            local file_count=$(wc -l < "$temp_file_list" | tr -d ' ')
+            echo -e "  ${CYAN}[i]${NC} 将检查 ${CYAN}${file_count}${NC} 个文件（使用 checksum 比对）"
+            
+            # 构建 rsync 命令（使用 --checksum 比对，--files-from 指定文件列表）
+            RSYNC_CMD="rsync -azc --files-from=\"$temp_file_list\" $RSYNC_SSH_OPTS \"$LOCAL_DIR/\" \"$SERVER_HOST:$TARGET_DIR/\""
+            SYNC_FILES_LIST="$temp_file_list"
+            
+        elif [ "$is_first_clone" = "true" ]; then
+            # 首次克隆：使用智能比对同步所有 Git 文件
+            echo -e "  ${CYAN}[i]${NC} 首次克隆，使用智能比对同步 Git 管理的文件"
+            
+            # 切换到本地目录
+            cd "$LOCAL_DIR"
+            
+            # 获取当前分支的所有 Git 文件
+            git checkout "$SERVER_BRANCH" >/dev/null 2>&1
+            local all_git_files=$(git ls-files)
+            
+            # 创建文件列表
+            local temp_file_list=$(mktemp)
+            echo "$all_git_files" > "$temp_file_list"
+            
+            # 添加 Replace 替换的文件
+            for replaced_file in "${REPLACED_FILES[@]}"; do
+                echo "$replaced_file" >> "$temp_file_list"
+            done
+            
+            # 使用 rsync --checksum 智能比对，只上传有差异的文件
+            echo -e "  ${YELLOW}[→]${NC} 智能比对中..."
+            
+            if [ -n "$LOG_FILE" ]; then
+                echo "  首次克隆，智能比对同步" >> "$LOG_FILE"
+            fi
+            
+            # 构建 rsync 命令（使用 --checksum 比对，--files-from 指定文件列表）
+            RSYNC_CMD="rsync -azc --files-from=\"$temp_file_list\" $RSYNC_SSH_OPTS \"$LOCAL_DIR/\" \"$SERVER_HOST:$TARGET_DIR/\""
+            SYNC_FILES_LIST="$temp_file_list"
+            
+        elif [ ${#files_to_upload[@]} -eq 0 ] && [ -z "$deleted_files" ]; then
+            # 无变更
+            echo -e "  ${YELLOW}[!]${NC} 无变更，跳过同步"
+            if [ -n "$LOG_FILE" ]; then
+                echo "  跳过同步: 无变更" >> "$LOG_FILE"
+            fi
+            continue
+            
+        else
+            # 有变更：智能同步
+            echo -e "  ${CYAN}[i]${NC} 检测到变更，准备同步..."
+            
+            # 切换到正确的分支
+            cd "$LOCAL_DIR" || {
+                log_error "无法切换到本地目录: $LOCAL_DIR"
+                continue
+            }
+            
+            if [ "$VERBOSE" = true ]; then
+                git checkout "$SERVER_BRANCH" 2>&1 || true
+            else
+                git checkout "$SERVER_BRANCH" >/dev/null 2>&1 || true
+            fi
+            
+            # 创建文件列表
+            local temp_file_list=$(mktemp)
+            for file in "${files_to_upload[@]}"; do
+                echo "$file" >> "$temp_file_list"
+            done
+            
+            #智能比对：只上传真正有变化的文件
+            if [ ${#files_to_upload[@]} -gt 0 ]; then
+                echo -e "  ${YELLOW}[→]${NC} 智能比对 ${CYAN}${#files_to_upload[@]}${NC} 个文件..."
+                
+                if [ -n "$LOG_FILE" ]; then
+                    echo "  待检查文件:" >> "$LOG_FILE"
+                    for file in "${files_to_upload[@]}"; do
+                        echo "    - $file" >> "$LOG_FILE"
+                    done
+                fi
+                
+                # 使用 rsync --checksum 比对
+                RSYNC_CMD="rsync -azc --files-from=\"$temp_file_list\" $RSYNC_SSH_OPTS \"$LOCAL_DIR/\" \"$SERVER_HOST:$TARGET_DIR/\""
+                SYNC_FILES_LIST="$temp_file_list"
+            fi
+            
+            # 处理删除的文件
+            if [ -n "$deleted_files" ]; then
+                DELETED_FILES_LIST=()
+                for file in $deleted_files; do
+                    [ -n "$file" ] && DELETED_FILES_LIST+=("$file")
+                done
+                echo -e "  ${RED}[!]${NC} 需要删除 ${CYAN}${#DELETED_FILES_LIST[@]}${NC} 个文件"
+                
+                if [ -n "$LOG_FILE" ]; then
+                    echo "  需要删除的文件:" >> "$LOG_FILE"
+                    for file in "${DELETED_FILES_LIST[@]}"; do
+                        echo "    - $file" >> "$LOG_FILE"
+                    done
+                fi
+            fi
         fi
 
-        if [ "$VERBOSE" = true ]; then
-            echo -e "${CYAN}执行命令:${NC} $RSYNC_CMD"
-            eval $RSYNC_CMD
-            RSYNC_EXIT_CODE=$?
-        else
+        # 4. 执行同步
+        if [ -n "$RSYNC_CMD" ]; then
+            if [ "$VERBOSE" = true ]; then
+                echo -e "${CYAN}执行命令:${NC} $RSYNC_CMD"
+                eval $RSYNC_CMD
+                RSYNC_EXIT_CODE=$?
+            else
             # 精简模式：实时滚动显示文件，完成后清除
             # 创建临时文件
             local temp_rsync_output=$(mktemp)
             
-            # 在rsync命令中添加 -v 参数以获取详细输出
-            local rsync_cmd_verbose
-            if [[ "$RSYNC_OPTIONS" != *"-v"* ]]; then
-                rsync_cmd_verbose="rsync -v $RSYNC_OPTIONS $RSYNC_SSH_OPTS $EXCLUDE_OPTS \"$LOCAL_DIR/\" \"$SERVER_HOST:$TARGET_DIR/\""
-            else
-                rsync_cmd_verbose="$RSYNC_CMD"
-            fi
+            # 添加 -v 参数以获取详细输出
+            local rsync_cmd_verbose=$(echo "$RSYNC_CMD" | sed 's/rsync /rsync -v /')
             
             # 后台执行rsync
             eval $rsync_cmd_verbose > "$temp_rsync_output" 2>&1 &
@@ -1222,11 +1598,67 @@ sync_to_servers() {
             
             # 清理临时文件
             rm -f "$temp_rsync_output"
+            fi
+        else
+            RSYNC_EXIT_CODE=0
         fi
-
-        # 清理rsync密码文件
+        
+        # 5. 处理删除操作（如果有）
+        if [ $RSYNC_EXIT_CODE -eq 0 ] && [ -n "$DELETED_FILES_LIST" ] && [ ${#DELETED_FILES_LIST[@]} -gt 0 ]; then
+            echo -e "  ${RED}[→]${NC} 删除服务器上的文件..."
+            
+            local delete_success_count=0
+            local delete_fail_count=0
+            
+            for file in "${DELETED_FILES_LIST[@]}"; do
+                # 检查文件是否在 exclude 列表中
+                local should_skip=false
+                for exclude_pattern in $EXCLUDE_OPTS; do
+                    local pattern=$(echo "$exclude_pattern" | sed 's/--exclude=//')
+                    if [[ "$file" == $pattern* ]]; then
+                        should_skip=true
+                        break
+                    fi
+                done
+                
+                if [ "$should_skip" = true ]; then
+                    echo -e "    ${YELLOW}[-]${NC} 跳过 (在排除列表中): $file"
+                    if [ -n "$LOG_FILE" ]; then
+                        echo "    跳过删除 (excluded): $file" >> "$LOG_FILE"
+                    fi
+                    continue
+                fi
+                
+                # 删除文件
+                if [ "$AUTH_TYPE" = "ssh" ]; then
+                    ssh -i "$AUTH_INFO" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "rm -f \"$TARGET_DIR/$file\"" 2>/dev/null
+                elif [ "$AUTH_TYPE" = "password" ]; then
+                    sshpass -p "$AUTH_INFO" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "rm -f \"$TARGET_DIR/$file\"" 2>/dev/null
+                fi
+                
+                if [ $? -eq 0 ]; then
+                    echo -e "    ${RED}[✗]${NC} $file"
+                    delete_success_count=$((delete_success_count + 1))
+                else
+                    echo -e "    ${YELLOW}[!]${NC} 删除失败: $file"
+                    delete_fail_count=$((delete_fail_count + 1))
+                fi
+            done
+            
+            if [ $delete_success_count -gt 0 ]; then
+                echo -e "  ${GREEN}[✓]${NC} 已删除 ${CYAN}${delete_success_count}${NC} 个文件"
+            fi
+            if [ $delete_fail_count -gt 0 ]; then
+                echo -e "  ${YELLOW}[!]${NC} ${delete_fail_count} 个文件删除失败"
+            fi
+        fi
+        
+        # 清理临时文件
         if [ -n "$TEMP_RSYNC_PASS_FILE" ] && [ -f "$TEMP_RSYNC_PASS_FILE" ]; then
             rm -f "$TEMP_RSYNC_PASS_FILE"
+        fi
+        if [ -n "$SYNC_FILES_LIST" ] && [ -f "$SYNC_FILES_LIST" ]; then
+            rm -f "$SYNC_FILES_LIST"
         fi
 
         if [ $RSYNC_EXIT_CODE -eq 0 ]; then
@@ -1304,17 +1736,26 @@ execute_post_sync_commands() {
         # 获取命令列表（按优先级：服务器级别 > 服务器组级别 > 全局默认）
         # 这里改为使用数组存储命令，避免某些环境下多行字符串/管道读取导致只执行部分命令
         COMMAND_LIST=()
+        COMMAND_SOURCE=""  # 记录命令来源
 
         # 服务器级别命令
         while IFS= read -r line; do
             [ -n "$line" ] && COMMAND_LIST+=("$line")
         done < <(yq e ".server_groups[$GROUP_INDEX].servers[$server_index].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
+        
+        if [ ${#COMMAND_LIST[@]} -gt 0 ]; then
+            COMMAND_SOURCE="服务器级别"
+        fi
 
         # 如果服务器级别没有配置，再尝试服务器组级别
         if [ ${#COMMAND_LIST[@]} -eq 0 ]; then
             while IFS= read -r line; do
                 [ -n "$line" ] && COMMAND_LIST+=("$line")
             done < <(yq e ".server_groups[$GROUP_INDEX].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
+            
+            if [ ${#COMMAND_LIST[@]} -gt 0 ]; then
+                COMMAND_SOURCE="服务器组级别"
+            fi
         fi
 
         # 如果服务器组级别也没有，再使用全局默认命令
@@ -1322,6 +1763,10 @@ execute_post_sync_commands() {
             while IFS= read -r line; do
                 [ -n "$line" ] && COMMAND_LIST+=("$line")
             done < <(yq e ".default_post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
+            
+            if [ ${#COMMAND_LIST[@]} -gt 0 ]; then
+                COMMAND_SOURCE="全局默认"
+            fi
         fi
 
         # 展开路径中的~
@@ -1345,7 +1790,7 @@ execute_post_sync_commands() {
 
     # 预处理命令并显示
     echo ""
-    echo -e "${CYAN}━━━━━━ 同步后命令 (${#COMMAND_LIST[@]} 条) ━━━━━━${NC}"
+    echo -e "${CYAN}━━━━━━ 同步后命令 (${#COMMAND_LIST[@]} 条) [${YELLOW}${COMMAND_SOURCE}${CYAN}] ━━━━━━${NC}"
     local cmd_count=0
 
     for command in "${COMMAND_LIST[@]}"; do
@@ -1435,13 +1880,13 @@ execute_post_sync_commands() {
                 
                 # 直接执行，不重定向输出
                 if [ "$AUTH_TYPE" = "ssh" ]; then
-                    ssh -i "$AUTH_INFO" -o StrictHostKeyChecking=no -t "$SERVER_HOST" "$processed_command"
+                    ssh -i "$AUTH_INFO" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -t "$SERVER_HOST" "$processed_command"
                     local cmd_exit_code=$?
                 elif [ "$AUTH_TYPE" = "password" ]; then
                     local temp_cmd_pass_file=$(mktemp)
                     echo "$AUTH_INFO" > "$temp_cmd_pass_file"
                     chmod 600 "$temp_cmd_pass_file"
-                    sshpass -f "$temp_cmd_pass_file" ssh -o StrictHostKeyChecking=no -t "$SERVER_HOST" "$processed_command"
+                    sshpass -f "$temp_cmd_pass_file" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -t "$SERVER_HOST" "$processed_command"
                     local cmd_exit_code=$?
                     rm -f "$temp_cmd_pass_file"
                 fi
@@ -1454,16 +1899,14 @@ execute_post_sync_commands() {
                 
                 # 根据认证类型在后台执行远程命令
                 if [ "$AUTH_TYPE" = "ssh" ]; then
-                    ssh -i "$AUTH_INFO" -o StrictHostKeyChecking=no "$SERVER_HOST" "$processed_command" > "$temp_cmd_output" 2>&1 &
+                    ssh -i "$AUTH_INFO" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "$processed_command" > "$temp_cmd_output" 2>&1 &
                     local cmd_pid=$!
                 elif [ "$AUTH_TYPE" = "password" ]; then
                     local temp_cmd_pass_file=$(mktemp)
                     echo "$AUTH_INFO" > "$temp_cmd_pass_file"
                     chmod 600 "$temp_cmd_pass_file"
-                    sshpass -f "$temp_cmd_pass_file" ssh -o StrictHostKeyChecking=no "$SERVER_HOST" "$processed_command" > "$temp_cmd_output" 2>&1 &
+                    sshpass -f "$temp_cmd_pass_file" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "$processed_command" > "$temp_cmd_output" 2>&1 &
                     local cmd_pid=$!
-                    # 在后台清理密码文件
-                    (sleep 1; rm -f "$temp_cmd_pass_file") &
                 fi
 
                 # 灰色文字滚动显示命令输出
@@ -1511,6 +1954,11 @@ execute_post_sync_commands() {
                 # 等待命令完成
                 wait $cmd_pid
                 local cmd_exit_code=$?
+                
+                # 命令完成后清理密码文件（避免竞态条件）
+                if [ "$AUTH_TYPE" = "password" ] && [ -n "$temp_cmd_pass_file" ] && [ -f "$temp_cmd_pass_file" ]; then
+                    rm -f "$temp_cmd_pass_file"
+                fi
                 
                 # 清除滚动显示区域
                 for ((j=0; j<$display_lines; j++)); do
