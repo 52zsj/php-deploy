@@ -32,7 +32,7 @@ stage_framework() {
     "$dest/data/secrets" "$dest/data/credentials" "$dest/data/replace" \
     "$dest/data/logs" "$dest/data/ssh"
 
-  cp -R sync.sh test_interactive.sh LICENSE NOTICE VERSION "$dest/"
+  cp -R sync.sh LICENSE NOTICE VERSION "$dest/"
   # 每次打包写入唯一 stamp，同版本号重打包也会触发安装目录覆盖
   date +%Y%m%d%H%M%S > "$dest/.payload-id"
   mkdir -p "$dest/yml"
@@ -53,7 +53,7 @@ stage_framework() {
     "$dest/data/credentials/.gitkeep" "$dest/data/replace/.gitkeep" \
     "$dest/data/logs/.gitkeep" "$dest/data/ssh/.gitkeep"
 
-  chmod +x "$dest/sync.sh" "$dest/test_interactive.sh" \
+  chmod +x "$dest/sync.sh" \
     "$dest/script/start-ui.sh" "$dest/script/migrate-secrets.sh" \
     "$dest/script/docker-entrypoint.sh" 2>/dev/null || true
 }

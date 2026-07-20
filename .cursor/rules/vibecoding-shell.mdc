@@ -29,8 +29,8 @@ alwaysApply: false
   - 镜像名 `gitship`；数据卷 `data/{configs,secrets,credentials,replace,logs,ssh}`
   - 入口命令：`ui`（默认）/ `sync` / `version` / `migrate-secrets` / `bash`
   - 离线构建可 `GITSHIP_BASE_IMAGE=php-deploy:local docker compose build`
-- `test_interactive.sh`：交互/输出效果本地 demo，不连真实服务器
-- `yml/*.yml`：项目同步配置（`demo.yml` 为模板）；真实项目配置放此目录，勿与根目录 `docker-compose.yml` 混放
+  - 离线构建可 `GITSHIP_BASE_IMAGE=php-deploy:local docker compose build`
+- `yml/demo.yml`：配置模板（入库）；其余 `yml/*.yml` 与 `data/configs/*.yml` 为本地配置（gitignore）
 - `replace/<项目>/<env>/...`：环境配置覆盖源，路径相对仓库根
 - `script/`：新增维护 / cron / 一次性 CLI（主入口仍为根目录 `sync.sh`）
 

@@ -2,16 +2,20 @@
 *.git-credentials
 .secrets/
 .idea
+.DS_Store
+.venv-desktop/
+.cunzhi-memory/
 
 # 打包产物
 dist/
 script/pack/launcher/payload.tar.gz
 
-# docker 本地数据（保留空目录 .gitkeep）
+# docker 本地数据（保留目录结构与 demo 模板）
 data/**
 !data/**/
 !data/**/.gitkeep
+!data/configs/demo.yml
 
-# 项目配置：仅提交 demo 模板，其余 yml 为本地/生产配置不入库
+# 项目配置：仅提交 demo 模板，其余为本地/生产配置不入库
 yml/*
 !yml/demo.yml

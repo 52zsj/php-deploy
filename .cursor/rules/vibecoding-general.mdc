@@ -18,7 +18,7 @@ _由 vibecoding-init-rules skill 自动生成 / 更新。_
 3. 改底层架构先告知并等待确认；小改可直接做。
 4. 单一 SQL 变更日志（本项目无 DB，不适用；若未来引入则用 `db/schema.sql`）。
 5. CLI：主入口保持根目录 `sync.sh`；新增 cron / 维护 / 一次性命令放 `script/`。
-6. 不生成多余文档，仅自动维护本规则集（已有 README/USAGE/TEST_GUIDE 勿擅自增删）。
+6. 不生成多余文档，仅自动维护本规则集（已有 README/USAGE 勿擅自增删）。
 7. 适配调用方，所有产物仅限当前项目。
 
 ## 产品标识
@@ -26,7 +26,7 @@ _由 vibecoding-init-rules skill 自动生成 / 更新。_
 - 安装目录：`~/Library/Application Support/gitship`（macOS）等；便携 `GITSHIP_PORTABLE=1`
 
 ## 底层架构
-- 入口：`./sync.sh`（交互式选择 `*.yml` 配置与服务器组）；辅助测试：`./test_interactive.sh`
+- 入口：`./sync.sh`（交互式选择 `*.yml` 配置与服务器组）
 - Web 界面：`./script/start-ui.sh`（本地 http://127.0.0.1:8765）；Docker：`docker compose up -d`（镜像 `gitship` + `data/` 外挂）
   - 数据卷：`data/configs|secrets|credentials|replace|logs|ssh` → 容器 `/data/*`，entrypoint 链到 `/app/yml` 等
   - `docker compose run --rm sync sync -y --config=…`；`docker compose exec ui version`
