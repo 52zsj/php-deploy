@@ -46,14 +46,14 @@ RUN set -eux; \
 
 WORKDIR /app
 
-COPY sync.sh test_interactive.sh LICENSE NOTICE VERSION ./
+COPY sync.sh LICENSE NOTICE VERSION ./
 COPY yml/demo.yml ./yml/demo.yml
 COPY script/docker-entrypoint.sh script/start-ui.sh script/migrate-secrets.sh ./script/
 COPY script/sync-ui/ ./script/sync-ui/
 COPY replace/.gitignore ./replace/.gitignore
 COPY logs/.gitignore ./logs/.gitignore
 
-RUN chmod +x sync.sh test_interactive.sh script/*.sh \
+RUN chmod +x sync.sh script/*.sh \
     && find script/sync-ui -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true \
     && find script/sync-ui -name '*.pyc' -delete 2>/dev/null || true \
     && mkdir -p \
