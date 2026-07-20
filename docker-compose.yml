@@ -1,0 +1,73 @@
+# GitShip Docker 编排：框架镜像 + 外挂 data/（密钥不进镜像）
+#
+# 首次：
+#   mkdir -p data/{configs,secrets,credentials,replace,logs,ssh}
+#   docker compose build
+#   docker compose up -d
+#   浏览器打开 http://127.0.0.1:8765
+#
+# 配置放 data/configs/*.yml ，密码放 data/secrets/<配置名>.env ，SSH 私钥放 data/ssh/
+#
+# CI 同步：
+#   docker compose run --rm sync sync -y --config=demo.yml --group=1 --post-sync=1
+
+name: gitship
+
+services:
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${GITSHIP_VERSION:-1.0.3}
+        BASE_IMAGE: ${GITSHIP_BASE_IMAGE:-debian:bookworm-slim}
+    image: ${GITSHIP_IMAGE:-gitship:local}
+    container_name: gitship-ui
+    ports:
+      - "${SYNC_UI_PORT:-8765}:8765"
+    environment:
+      SYNC_UI_HOST: "0.0.0.0"
+      SYNC_UI_PORT: "8765"
+      SYNC_UI_NO_BROWSER: "1"
+      DATA_CONFIGS: /data/configs
+      DATA_SECRETS: /data/secrets
+      DATA_CREDENTIALS: /data/credentials
+      DATA_REPLACE: /data/replace
+      DATA_LOGS: /data/logs
+      DATA_SSH: /data/ssh
+    volumes:
+      - ./data/configs:/data/configs
+      - ./data/secrets:/data/secrets
+      - ./data/credentials:/data/credentials
+      - ./data/replace:/data/replace
+      - ./data/logs:/data/logs
+      - ./data/ssh:/data/ssh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # 一次性任务：docker compose run --rm sync sync -y --config=xxx.yml --group=1
+  sync:
+    image: ${GITSHIP_IMAGE:-gitship:local}
+    profiles: ["cli"]
+    environment:
+      SYNC_UI_NO_BROWSER: "1"
+      DATA_CONFIGS: /data/configs
+      DATA_SECRETS: /data/secrets
+      DATA_CREDENTIALS: /data/credentials
+      DATA_REPLACE: /data/replace
+      DATA_LOGS: /data/logs
+      DATA_SSH: /data/ssh
+    volumes:
+      - ./data/configs:/data/configs
+      - ./data/secrets:/data/secrets
+      - ./data/credentials:/data/credentials
+      - ./data/replace:/data/replace
+      - ./data/logs:/data/logs
+      - ./data/ssh:/data/ssh:ro
+    entrypoint: ["/app/script/docker-entrypoint.sh"]
+    command: ["sync"]

@@ -1,0 +1,59 @@
+---
+description: Vibecoding 项目通用规则（总则），每次对话都须遵循。
+globs:
+alwaysApply: true
+---
+
+# 项目总则（vibecoding）
+_由 vibecoding-init-rules skill 自动生成 / 更新。_
+
+- 初始化时间：2026-07-20 10:40:19
+- 调用方：Cursor
+- SQL 变更日志：无（本项目无数据库）
+- CLI 脚本目录：根目录入口 + `script/`（含 `pack.sh` 多平台打包）
+
+## 七条核心规则（始终遵守）
+1. 初始化一次，永久复用（已生成规则文件直接读，不重扫）。
+2. 命名简洁、禁止过度封装（同逻辑 ≥2 处复用才抽方法）。
+3. 改底层架构先告知并等待确认；小改可直接做。
+4. 单一 SQL 变更日志（本项目无 DB，不适用；若未来引入则用 `db/schema.sql`）。
+5. CLI：主入口保持根目录 `sync.sh`；新增 cron / 维护 / 一次性命令放 `script/`。
+6. 不生成多余文档，仅自动维护本规则集（已有 README/USAGE/TEST_GUIDE 勿擅自增删）。
+7. 适配调用方，所有产物仅限当前项目。
+
+## 产品标识
+- 产品名：**GitShip**；CLI / 镜像 / 打包产物：`gitship`（原 php-deploy / Gitee 同步工具）
+- 安装目录：`~/Library/Application Support/gitship`（macOS）等；便携 `GITSHIP_PORTABLE=1`
+
+## 底层架构
+- 入口：`./sync.sh`（交互式选择 `*.yml` 配置与服务器组）；辅助测试：`./test_interactive.sh`
+- Web 界面：`./script/start-ui.sh`（本地 http://127.0.0.1:8765）；Docker：`docker compose up -d`（镜像 `gitship` + `data/` 外挂）
+  - 数据卷：`data/configs|secrets|credentials|replace|logs|ssh` → 容器 `/data/*`，entrypoint 链到 `/app/yml` 等
+  - `docker compose run --rm sync sync -y --config=…`；`docker compose exec ui version`
+  - 打包：`./script/pack.sh [linux|macos|windows|docker|all]` → `dist/`
+- 分层：单文件 Bash 流水线（CLI 主路径；Web 仅为配置/执行壳）
+  - 配置选择 → YAML 解析 → Git 拉取 → Replace 替换 → rsync 智能同步 → 同步后命令 → 凭据清理
+- 关键技术模块（均在 `sync.sh`）：
+  - `select_config_file` / `parse_config` / `select_server_group`：交互与配置
+  - `setup_git_credentials` / `pull_code`：Git 拉取与变更检测（A/M/D）
+  - `replace_configs`：按 `replace_dir/<env>/` 覆盖本地检出（优先级最高）
+  - `sync_to_servers`：rsync `--checksum`，只操作 Git 管理的文件
+  - `execute_post_sync_commands`：多层级 post_sync（服务器 > 组 > 全局）
+  - 日志：`log_*` + 按配置名归档到 `logs/`
+- 数据流：`yml/*.yml` → 本地 `gitee.local_dir` 检出 → `replace/<project>/<env>/` 覆盖 → SSH/rsync 到 `server.target_dir` → 远程 post 命令
+- 跨端约定：无前后端；目标机多为站点目录，本工具本身是 Shell
+- 框架约定目录：
+  - 项目配置：`yml/*.yml`（`yml/demo.yml` 为模板；勿与根目录 docker-compose.yml 混放）
+  - 环境替换：`replace/<项目名>/<env>/`（相对路径镜像仓库结构）
+  - Git 凭据缓存：`.credentials/`（已 gitignore，勿提交）
+  - 密码外置：`.secrets/<配置名>.env`（已 gitignore；yml 用 `secret:KEY` / `env:VAR`）
+  - 日志：`logs/`
+
+## 路由规则（总览）
+- 无 HTTP 路由；交互入口为 CLI 编号选择配置文件与服务器组。
+- 命令行开关：`-v/--verbose`、`-f/--force`、`-q/--quiet`、`--log=/path`、`-h/--help`。
+
+## 确认闸门
+- 任何底层架构改动须先告知并等待确认（如拆分 `sync.sh`、更换同步策略、改 YAML schema）。
+- 不确定或大改动同样先确认。
+- 切勿提交 `.credentials/`、含真实密码的 yml、或 `replace/` 下真实生产密钥。

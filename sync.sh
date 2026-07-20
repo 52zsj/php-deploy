@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Gitee代码同步工具
+# GitShip — Git 拉取与多机同步工具
 # Copyright (c) 2025 zsj-950127
 #
 # MIT License - 允许商业使用、修改和分发
@@ -11,6 +11,12 @@ VERBOSE=false
 LOG_FILE=""
 QUIET_MODE=false
 FORCE_SYNC=false
+AUTO_YES=false
+PRESET_CONFIG=""
+PRESET_GROUP=""
+PRESET_POST_SYNC=""
+POST_COMMANDS_FILE=""
+EXCLUDE_PATTERNS=()
 for arg in "$@"; do
     case $arg in
         -v|--verbose)
@@ -25,6 +31,26 @@ for arg in "$@"; do
             QUIET_MODE=true
             shift
             ;;
+        -y|--yes)
+            AUTO_YES=true
+            shift
+            ;;
+        --config=*)
+            PRESET_CONFIG="${arg#*=}"
+            shift
+            ;;
+        --group=*)
+            PRESET_GROUP="${arg#*=}"
+            shift
+            ;;
+        --post-sync=*)
+            PRESET_POST_SYNC="${arg#*=}"
+            shift
+            ;;
+        --post-commands-file=*)
+            POST_COMMANDS_FILE="${arg#*=}"
+            shift
+            ;;
         --log=*)
             LOG_FILE="${arg#*=}"
             shift
@@ -35,6 +61,11 @@ for arg in "$@"; do
             echo "  -v, --verbose        显示详细输出"
             echo "  -f, --force          强制同步所有 Git 管理的文件"
             echo "  -q, --quiet          精简模式，详细日志写入文件"
+            echo "  -y, --yes            非交互模式，自动确认所有提示"
+            echo "  --config=FILE        指定配置文件（跳过交互选择）"
+            echo "  --group=N            指定服务器组编号（跳过交互选择）"
+            echo "  --post-sync=MODE     同步后命令: 1/all 全部 | 2/ask 逐个确认 | 3/skip 跳过"
+            echo "  --post-commands-file=FILE  使用文件中的命令列表（每行一条，覆盖 YAML）"
             echo "  --log=/path/file     将关键日志额外写入到指定文件"
             echo "  -h, --help           显示帮助信息"
             exit 0
@@ -60,6 +91,19 @@ YELLOW='\033[0;33m'   # 警告/提示
 BLUE='\033[0;34m'     # 信息/普通
 CYAN='\033[0;36m'     # 高亮/强调
 NC='\033[0m'          # No Color
+
+# 交互式提示（-y/--yes 时使用默认值）
+sync_prompt() {
+    local __answer_var="$1"
+    local __prompt_text="$2"
+    local __default="${3:-}"
+
+    if [ "$AUTO_YES" = true ] && [ -n "$__default" ]; then
+        eval "$__answer_var=\"$__default\""
+        return 0
+    fi
+    read -p "$__prompt_text" "$__answer_var"
+}
 
 # 内容高亮辅助函数（用于高亮日志内容中的关键信息）
 highlight_path() {
@@ -234,32 +278,56 @@ show_progress() {
     echo -ne "\r${GREEN}${message}完成${NC}\n"
 }
 
-# 安全执行Git命令的函数
-safe_git_command() {
-    local message="$1"
-    local git_cmd="$2"
-    shift 2
-    local args=("$@")
-
-    if [ "$VERBOSE" = true ]; then
-        log_info "执行Git命令: git $git_cmd ${args[*]}"
-        git "$git_cmd" "${args[@]}"
+# Git 命令：保留原生输出；stdbuf + GIT_FLUSH 确保 Web/PTY 下实时刷新
+run_git() {
+    export GIT_FLUSH=1
+    if command -v stdbuf >/dev/null 2>&1; then
+        stdbuf -oL -eL git "$@"
     else
-        # 在后台执行命令
-        git "$git_cmd" "${args[@]}" >/dev/null 2>&1 &
-        local cmd_pid=$!
-
-        # 显示进度
-        show_progress "$message" "$cmd_pid"
-
-        # 等待命令完成并获取退出状态
-        wait "$cmd_pid"
-        return $?
+        git "$@"
     fi
 }
 
-# 保存脚本文件所在目录
-SCRIPT_DIR=$(cd $(dirname "$0") && pwd)
+# Git 命令：保留原生输出（不封装「正在…」）；安静模式才写入日志或丢弃
+safe_git_command() {
+    local _message="$1"
+    shift
+
+    if [ "$VERBOSE" = true ]; then
+        log_info "执行Git命令: git $*"
+    fi
+
+    if [ "$QUIET_MODE" = true ]; then
+        if [ -n "$LOG_FILE" ]; then
+            run_git "$@" >>"$LOG_FILE" 2>&1
+        else
+            run_git "$@" >/dev/null 2>&1
+        fi
+        return $?
+    fi
+
+    run_git "$@"
+}
+
+# 保存脚本文件所在目录（路径可能含空格，如 macOS Application Support）
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+GITSHIP_VERSION=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
+
+# 启动 / 完成横幅（简洁单行，终端与 Web UI 均友好）
+print_run_header() {
+    echo -e "${CYAN}GitShip${NC} v${GITSHIP_VERSION}"
+    echo -e "${BLUE}────────────────────────────────────────${NC}"
+    echo ""
+}
+
+print_run_footer() {
+    echo ""
+    echo -e "${GREEN}✓${NC} 同步完成"
+    if [ -n "$LOG_FILE" ]; then
+        echo -e "  ${CYAN}日志${NC} $LOG_FILE"
+    fi
+    echo ""
+}
 
 # 初始化日志目录和文件（按日期划分）
 init_log_file() {
@@ -290,6 +358,221 @@ expand_path() {
         path="$SCRIPT_DIR/${path#./}"
     fi
     echo "$path"
+}
+
+# 当前配置对应的 secrets 文件路径
+secrets_file_path() {
+    local base
+    base=$(basename "${CONFIG_FILE:-unknown}" .yml)
+    echo "$SCRIPT_DIR/.secrets/${base}.env"
+}
+
+# 从 .env 文件读取 KEY=VALUE（支持引号，忽略注释与空行）
+lookup_secret_key() {
+    local key="$1"
+    local file="$2"
+    local line k v
+
+    [ -f "$file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        [ -z "$line" ] && continue
+        [[ "$line" == \#* ]] && continue
+        k="${line%%=*}"
+        v="${line#*=}"
+        [ "$k" = "$key" ] || continue
+        # 去掉包裹引号
+        if [[ "$v" == \"*\" ]]; then
+            v="${v:1:${#v}-2}"
+        elif [[ "$v" == \'*\' ]]; then
+            v="${v:1:${#v}-2}"
+        fi
+        echo "$v"
+        return 0
+    done < "$file"
+    return 1
+}
+
+# 解析密钥引用：secret:KEY | env:VAR | 明文（兼容，会告警）
+# 用法: resolve_secret "$value" ["字段名"]
+resolve_secret() {
+    local value="$1"
+    local field_name="${2:-}"
+    local resolved=""
+
+    if [[ "$value" == secret:* ]]; then
+        local key="${value#secret:}"
+        local sfile
+        sfile=$(secrets_file_path)
+        if ! resolved=$(lookup_secret_key "$key" "$sfile"); then
+            log_error "无法解析 ${field_name:-secret}: 未找到密钥 $key（文件: $sfile）"
+            exit 1
+        fi
+        echo "$resolved"
+        return 0
+    fi
+
+    if [[ "$value" == env:* ]]; then
+        local var_name="${value#env:}"
+        resolved=$(printenv "$var_name" 2>/dev/null || true)
+        if [ -z "$resolved" ]; then
+            log_error "无法解析 ${field_name:-env}: 环境变量 $var_name 未设置"
+            exit 1
+        fi
+        echo "$resolved"
+        return 0
+    fi
+
+    # 明文兼容：对密码类字段给出迁移提示
+    if [ -n "$value" ] && [ -n "$field_name" ]; then
+        case "$field_name" in
+            *password*|*PASSWORD*|auth_info)
+                if [[ "$value" != /* ]] && [[ "$value" != ~* ]]; then
+                    log_warn "${field_name} 仍为明文，建议执行 ./script/migrate-secrets.sh 或 Web 保存迁移到 .secrets/"
+                fi
+                ;;
+        esac
+    fi
+    echo "$value"
+}
+
+# 日志用：去掉 URL 中的 user:pass@
+redact_url() {
+    local url="$1"
+    echo "$url" | sed -E 's#(https?://)[^/@:]+:[^/@]+@#\1***:***@#'
+}
+
+# 路径中是否含「点开头的目录」段（.git / .cursor / .idea / .xxx/...）
+# 纯点文件（如 .htaccess、.env）不按此规则排除，可继续用 sync.exclude
+is_dot_directory_path() {
+    local file="$1"
+    local rest="$file"
+    local part
+
+    while [[ "$rest" == */* ]]; do
+        part="${rest%%/*}"
+        rest="${rest#*/}"
+        case "$part" in
+            .|..) ;;
+            .*) return 0 ;;
+        esac
+    done
+
+    # 最后一段：仅当本地确实是目录时排除
+    case "$rest" in
+        .|..) return 1 ;;
+        .*)
+            if [ -n "$LOCAL_DIR" ] && [ -d "$LOCAL_DIR/$file" ]; then
+                return 0
+            fi
+            if [ -d "$file" ]; then
+                return 0
+            fi
+            ;;
+    esac
+    return 1
+}
+
+# 判断相对路径是否匹配 exclude 规则（上传与删除共用）
+# 内置：任意点开头目录；另支持 sync.exclude：dir/、dir、*.ext、精确文件名
+is_excluded() {
+    local file="$1"
+    local pattern
+    local base
+    base=$(basename "$file")
+
+    # 内置：永远不上传 .git / .cursor / .idea 等点目录及其下文件
+    if is_dot_directory_path "$file"; then
+        return 0
+    fi
+
+    for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+        [ -z "$pattern" ] && continue
+        case "$pattern" in
+            */)
+                # 目录前缀：runtime/ → runtime/...
+                if [[ "$file" == ${pattern}* ]]; then
+                    return 0
+                fi
+                ;;
+            *\**)
+                # 通配符：*.log → 匹配 basename 或完整路径
+                # shellcheck disable=SC2254
+                if [[ "$base" == $pattern ]] || [[ "$file" == $pattern ]]; then
+                    return 0
+                fi
+                ;;
+            *)
+                # 精确或目录名：miniapp → miniapp 与 miniapp/...
+                if [[ "$file" == "$pattern" ]] || [[ "$file" == "$pattern"/* ]]; then
+                    return 0
+                fi
+                ;;
+        esac
+    done
+    return 1
+}
+
+# 远端是否缺少抽样 Git 文件（目标目录被清空/不完整时返回 0）
+remote_missing_samples() {
+    local sample
+    local missing=0
+    local total=0
+
+    for sample in "$@"; do
+        [ -z "$sample" ] && continue
+        total=$((total + 1))
+        local ok=1
+        if [ "$AUTH_TYPE" = "ssh" ]; then
+            ssh -i "$AUTH_INFO" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+                "$SERVER_HOST" "test -f \"$TARGET_DIR/$sample\"" >/dev/null 2>&1 && ok=0
+        elif [ "$AUTH_TYPE" = "password" ]; then
+            sshpass -p "$AUTH_INFO" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+                "$SERVER_HOST" "test -f \"$TARGET_DIR/$sample\"" >/dev/null 2>&1 && ok=0
+        fi
+        if [ $ok -ne 0 ]; then
+            missing=$((missing + 1))
+            if [ "$VERBOSE" = true ]; then
+                echo -e "  ${YELLOW}[-]${NC} 远端缺失: $sample"
+            fi
+        fi
+    done
+
+    if [ $total -eq 0 ]; then
+        return 1
+    fi
+    if [ $missing -gt 0 ]; then
+        echo -e "  ${YELLOW}[!]${NC} 远端抽样缺失 ${CYAN}${missing}/${total}${NC} 个文件"
+        return 0
+    fi
+    return 1
+}
+
+# 写出全量同步文件列表（git ls-files + replace，应用 exclude），打印到 stdout 为路径
+build_full_sync_list() {
+    local out_file="$1"
+    local skip_count=0
+    : > "$out_file"
+
+    cd "$LOCAL_DIR" || return 1
+    git checkout "$SERVER_BRANCH" >/dev/null 2>&1 || true
+
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        if is_excluded "$file"; then
+            skip_count=$((skip_count + 1))
+        else
+            echo "$file" >> "$out_file"
+        fi
+    done < <(git ls-files)
+
+    for replaced_file in "${REPLACED_FILES[@]}"; do
+        if ! is_excluded "$replaced_file"; then
+            echo "$replaced_file" >> "$out_file"
+        fi
+    done
+
+    echo "$skip_count"
 }
 
 # URL编码函数
@@ -330,48 +613,67 @@ check_dependencies() {
     echo ""
 }
 
-# 列出并选择配置文件
+# 列出并选择配置文件（统一放在 yml/ 目录，避免与 docker-compose.yml 等混淆）
 select_config_file() {
-    echo -e "${BLUE}[→]${NC} 查找配置文件..."
+    CONFIG_DIR="$SCRIPT_DIR/yml"
+    mkdir -p "$CONFIG_DIR"
 
-    # 使用兼容macOS和Linux的方式查找所有.yml文件
+    if [ -n "$PRESET_CONFIG" ]; then
+        echo -e "${BLUE}[→]${NC} 使用指定配置文件..."
+        if [[ "$PRESET_CONFIG" == /* ]]; then
+            CONFIG_FILE="$PRESET_CONFIG"
+        elif [[ "$PRESET_CONFIG" == yml/* ]] || [[ "$PRESET_CONFIG" == ./yml/* ]]; then
+            CONFIG_FILE="$SCRIPT_DIR/${PRESET_CONFIG#./}"
+        elif [ -f "$CONFIG_DIR/$PRESET_CONFIG" ]; then
+            CONFIG_FILE="$CONFIG_DIR/$PRESET_CONFIG"
+        elif [ -f "$SCRIPT_DIR/$PRESET_CONFIG" ]; then
+            # 兼容旧路径（根目录）
+            CONFIG_FILE="$SCRIPT_DIR/$PRESET_CONFIG"
+        else
+            CONFIG_FILE="$CONFIG_DIR/$PRESET_CONFIG"
+        fi
+        if [ ! -f "$CONFIG_FILE" ]; then
+            log_error "配置文件 $CONFIG_FILE 不存在（请放在 yml/ 目录）"
+            exit 1
+        fi
+        CONFIG_FILE_BASE=$(basename "$CONFIG_FILE" .yml)
+        init_log_file "$CONFIG_FILE_BASE"
+        echo -e "${GREEN}[✓]${NC} 配置文件: ${CYAN}$(basename "$CONFIG_FILE")${NC}"
+        echo -e "${GREEN}[✓]${NC} 日志文件: ${CYAN}$LOG_FILE${NC}"
+        echo ""
+        return
+    fi
+
+    echo -e "${BLUE}[→]${NC} 查找配置文件 (yml/)..."
+
     CONFIG_FILES=()
-    for file in *.yml; do
-        # 检查文件是否存在且不是通配符本身
+    for file in "$CONFIG_DIR"/*.yml; do
         if [ -f "$file" ]; then
-            CONFIG_FILES+=("$file")
+            CONFIG_FILES+=("$(basename "$file")")
         fi
     done
 
-    # 如果没有找到任何配置文件
     if [ ${#CONFIG_FILES[@]} -eq 0 ]; then
-        log_error "未找到任何.yml配置文件"
+        log_error "未找到任何.yml配置文件（请放到 $CONFIG_DIR/）"
         exit 1
     fi
 
     echo ""
     echo -e "${CYAN}可用配置文件:${NC}"
-    # 显示找到的配置文件列表
     for i in "${!CONFIG_FILES[@]}"; do
         echo -e "  ${GREEN}[$((i+1))]${NC} ${CONFIG_FILES[$i]}"
     done
 
     echo ""
-    # 请求用户选择
-    read -p "请输入配置文件编号 (1-${#CONFIG_FILES[@]}): " choice
+    sync_prompt choice "请输入配置文件编号 (1-${#CONFIG_FILES[@]}): "
 
-    # 验证用户输入
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#CONFIG_FILES[@]} ]; then
         log_error "无效的选择"
         exit 1
     fi
 
-    # 设置选择的配置文件
-    CONFIG_FILE="${CONFIG_FILES[$((choice-1))]}"
-    # 使用绝对路径
-    CONFIG_FILE="$SCRIPT_DIR/$CONFIG_FILE"
+    CONFIG_FILE="$CONFIG_DIR/${CONFIG_FILES[$((choice-1))]}"
     
-    # 初始化日志文件
     CONFIG_FILE_BASE=$(basename "$CONFIG_FILE" .yml)
     init_log_file "$CONFIG_FILE_BASE"
     
@@ -402,7 +704,8 @@ parse_config() {
             GIT_SSH_KEY=$(expand_path "$GIT_SSH_KEY")
         elif [ "$GIT_AUTH_TYPE" = "password" ]; then
             GIT_USERNAME=$(yq e '.gitee.username' "$CONFIG_FILE")
-            GIT_PASSWORD=$(yq e '.gitee.password' "$CONFIG_FILE")
+            GIT_PASSWORD_RAW=$(yq e '.gitee.password' "$CONFIG_FILE")
+            GIT_PASSWORD=$(resolve_secret "$GIT_PASSWORD_RAW" "gitee.password")
         fi
 
         RSYNC_OPTIONS=$(yq e '.sync.rsync_options' "$CONFIG_FILE")
@@ -410,11 +713,18 @@ parse_config() {
         # 获取服务器组数量
         GROUP_COUNT=$(yq e '.server_groups | length' "$CONFIG_FILE")
 
-        # 提取排除项
+        # 提取排除项（数组，避免 *.log 被 shell 展开）
+        EXCLUDE_PATTERNS=()
         EXCLUDE_COUNT=$(yq e '.sync.exclude | length' "$CONFIG_FILE")
+        if [ "$EXCLUDE_COUNT" != "null" ] && [ "$EXCLUDE_COUNT" -gt 0 ] 2>/dev/null; then
+            for ((i=0; i<$EXCLUDE_COUNT; i++)); do
+                EXCLUDE_ITEM=$(yq e ".sync.exclude[$i]" "$CONFIG_FILE")
+                [ -n "$EXCLUDE_ITEM" ] && [ "$EXCLUDE_ITEM" != "null" ] && EXCLUDE_PATTERNS+=("$EXCLUDE_ITEM")
+            done
+        fi
+        # 兼容旧变量名（删除逻辑曾用 --exclude= 串）
         EXCLUDE_OPTS=""
-        for ((i=0; i<$EXCLUDE_COUNT; i++)); do
-            EXCLUDE_ITEM=$(yq e ".sync.exclude[$i]" "$CONFIG_FILE")
+        for EXCLUDE_ITEM in "${EXCLUDE_PATTERNS[@]}"; do
             EXCLUDE_OPTS="$EXCLUDE_OPTS --exclude=$EXCLUDE_ITEM"
         done
     else
@@ -449,7 +759,7 @@ elif gitee_config['auth_type'] == 'password':
 output['rsync_options'] = config['sync']['rsync_options']
 output['group_count'] = len(config['server_groups'])
 output['server_groups'] = config['server_groups']
-output['exclude'] = config['sync']['exclude']
+output['exclude'] = config['sync'].get('exclude') or []
 
 print(json.dumps(output))
 EOF
@@ -465,20 +775,33 @@ EOF
             GIT_SSH_KEY=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin).get('git_ssh_key', ''))")
         elif [ "$GIT_AUTH_TYPE" = "password" ]; then
             GIT_USERNAME=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin).get('git_username', ''))")
-            GIT_PASSWORD=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin).get('git_password', ''))")
+            GIT_PASSWORD_RAW=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin).get('git_password', ''))")
+            GIT_PASSWORD=$(resolve_secret "$GIT_PASSWORD_RAW" "gitee.password")
         fi
 
         RSYNC_OPTIONS=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['rsync_options'])")
         GROUP_COUNT=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['group_count'])")
 
-        # 提取排除项
-        EXCLUDE_ITEMS=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(' '.join(['--exclude=' + item for item in json.load(sys.stdin)['exclude']]))")
-        EXCLUDE_OPTS="$EXCLUDE_ITEMS"
+        # 提取排除项到数组
+        EXCLUDE_PATTERNS=()
+        while IFS= read -r EXCLUDE_ITEM; do
+            [ -n "$EXCLUDE_ITEM" ] && EXCLUDE_PATTERNS+=("$EXCLUDE_ITEM")
+        done < <(echo "$CONFIG_JSON" | python3 -c "import sys, json; [print(i) for i in json.load(sys.stdin).get('exclude', [])]")
+        EXCLUDE_OPTS=""
+        for EXCLUDE_ITEM in "${EXCLUDE_PATTERNS[@]}"; do
+            EXCLUDE_OPTS="$EXCLUDE_OPTS --exclude=$EXCLUDE_ITEM"
+        done
+    fi
+
+    if [ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]; then
+        log_info "排除规则: ${CYAN}${#EXCLUDE_PATTERNS[@]}${NC} 条配置 + 内置过滤点目录（上传与删除均生效）"
+    else
+        log_info "排除规则: 内置过滤点目录 .git/.cursor/.idea/…（上传与删除均生效）"
     fi
 
     # 验证Git认证类型
     if [ "$GIT_AUTH_TYPE" != "ssh" ] && [ "$GIT_AUTH_TYPE" != "password" ]; then
-        log_error "Gitee认证类型必须为'ssh'或'password'"
+        log_error "Git 认证类型必须为 'ssh' 或 'password'"
         exit 1
     fi
 
@@ -494,10 +817,10 @@ EOF
         exit 1
     fi
 
-    # 写入详细信息到日志文件
+    # 写入详细信息到日志文件（URL 脱敏，不含密码）
     if [ -n "$LOG_FILE" ]; then
         echo "配置详情:" >> "$LOG_FILE"
-        echo "  仓库URL: $REPO_URL" >> "$LOG_FILE"
+        echo "  仓库URL: $(redact_url "$REPO_URL")" >> "$LOG_FILE"
         echo "  本地目录: $LOCAL_DIR" >> "$LOG_FILE"
         echo "  认证类型: $GIT_AUTH_TYPE" >> "$LOG_FILE"
         if [ "$GIT_AUTH_TYPE" = "ssh" ]; then
@@ -536,7 +859,12 @@ for i, group in enumerate(data['server_groups']):
 
     echo ""
     # 请求用户选择
-    read -p "请输入服务器组编号 (1-$GROUP_COUNT): " group_choice
+    if [ -n "$PRESET_GROUP" ]; then
+        group_choice="$PRESET_GROUP"
+        echo -e "${GREEN}[✓]${NC} 指定服务器组编号: ${CYAN}$group_choice${NC}"
+    else
+        sync_prompt group_choice "请输入服务器组编号 (1-$GROUP_COUNT): "
+    fi
 
     # 验证用户输入
     if ! [[ "$group_choice" =~ ^[0-9]+$ ]] || [ "$group_choice" -lt 1 ] || [ "$group_choice" -gt $GROUP_COUNT ]; then
@@ -605,8 +933,8 @@ setup_git_credentials() {
             exit 1
         fi
 
-        # 配置git使用特定的SSH密钥
-        export GIT_SSH_COMMAND="ssh -i $GIT_SSH_KEY -o StrictHostKeyChecking=no"
+        # 配置 git 使用特定 SSH 密钥（关 hostkey 提示，避免污染进度输出）
+        export GIT_SSH_COMMAND="ssh -i $GIT_SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
     fi
 }
 
@@ -658,7 +986,15 @@ print(' '.join(branches))
             git config credential.helper "store --file=$GIT_CREDENTIALS_FILE"
         fi
 
-        git fetch origin
+        if [ "$QUIET_MODE" = true ]; then
+            if [ -n "$LOG_FILE" ]; then
+                run_git fetch origin >>"$LOG_FILE" 2>&1
+            else
+                run_git fetch origin >/dev/null 2>&1
+            fi
+        else
+            run_git fetch --progress origin
+        fi
 
         # 检出并更新每个需要的分支
         for branch in "${REQUIRED_BRANCHES[@]}"; do
@@ -672,18 +1008,13 @@ print(' '.join(branches))
                 old_commit=$(git rev-parse "$branch")
             fi
 
-            # 切换分支
-            if [ "$VERBOSE" = true ]; then
-                git checkout "$branch" || git checkout -b "$branch" "origin/$branch"
-            else
-                # 尝试切换到现有分支，如果失败则创建新分支
-                if ! safe_git_command "正在切换到分支 $branch" "checkout" "$branch"; then
-                    safe_git_command "正在创建分支 $branch" "checkout" "-b" "$branch" "origin/$branch"
-                fi
+            # 切换分支（原生 git 输出）
+            if ! safe_git_command "checkout $branch" checkout "$branch"; then
+                safe_git_command "checkout -b $branch" checkout -b "$branch" "origin/$branch"
             fi
 
             # 拉取更新
-            safe_git_command "正在拉取分支 $branch 的最新代码" "pull" "origin" "$branch"
+            safe_git_command "pull $branch" pull --progress origin "$branch"
             
             # 检测 Git 变更（详细类型：A/M/D）
             local new_commit=$(git rev-parse HEAD)
@@ -758,8 +1089,30 @@ print(' '.join(branches))
             echo "" >> "$LOG_FILE"
         fi
     else
-        # 克隆默认分支
-        safe_git_command "正在克隆代码" "clone" "--branch" "$DEFAULT_BRANCH" "$REPO_URL" "."
+        # 首次克隆：直接 git clone，保留原生输出（仅此步不封装；pull/checkout 仍走 safe_git_command）
+        local clone_status=0
+        if [ "$QUIET_MODE" = true ]; then
+            if [ -n "$LOG_FILE" ]; then
+                run_git clone --progress --branch "$DEFAULT_BRANCH" "$REPO_URL" "." >>"$LOG_FILE" 2>&1
+            else
+                run_git clone --progress --branch "$DEFAULT_BRANCH" "$REPO_URL" "." >/dev/null 2>&1
+            fi
+            clone_status=$?
+        else
+            run_git clone --progress --branch "$DEFAULT_BRANCH" "$REPO_URL" "."
+            clone_status=$?
+            if [ -n "$LOG_FILE" ]; then
+                if [ "$clone_status" -eq 0 ]; then
+                    echo "  git clone 成功 (branch=$DEFAULT_BRANCH)" >> "$LOG_FILE"
+                else
+                    echo "  git clone 失败 (exit=$clone_status)" >> "$LOG_FILE"
+                fi
+            fi
+        fi
+        if [ "$clone_status" -ne 0 ]; then
+            log_error "代码克隆失败"
+            exit 1
+        fi
 
         # 确保使用正确的凭据配置
         if [ "$GIT_AUTH_TYPE" = "password" ]; then
@@ -772,7 +1125,7 @@ print(' '.join(branches))
                 if [ -n "$LOG_FILE" ]; then
                     echo "  获取分支: $branch" >> "$LOG_FILE"
                 fi
-                git checkout -b "$branch" "origin/$branch" >> "$LOG_FILE" 2>&1
+                safe_git_command "checkout -b $branch" checkout -b "$branch" "origin/$branch"
             fi
             # 首次克隆，标记为首次同步
             local branch_var=$(echo "$branch" | sed 's/[^a-zA-Z0-9_]/_/g')
@@ -1000,7 +1353,7 @@ sync_to_servers() {
         HAS_PROXY=1
 
         # 询问是否为SSH连接临时禁用代理
-        read -p "是否为SSH连接临时禁用代理? (y/n): " disable_proxy_choice
+        sync_prompt disable_proxy_choice "是否为SSH连接临时禁用代理? (y/n): " "y"
         if [ "$disable_proxy_choice" = "y" ] || [ "$disable_proxy_choice" = "Y" ]; then
             # 备份当前代理设置
             export BACKUP_HTTP_PROXY=$http_proxy
@@ -1027,6 +1380,8 @@ sync_to_servers() {
             # 展开路径中的~
             if [[ "$AUTH_TYPE" = "ssh" ]]; then
                 AUTH_INFO=$(expand_path "$AUTH_INFO")
+            elif [[ "$AUTH_TYPE" = "password" ]]; then
+                AUTH_INFO=$(resolve_secret "$AUTH_INFO" "servers[$i].auth_info")
             fi
         else
             SERVER_JSON=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.dumps(json.load(sys.stdin)['server_groups'][$GROUP_INDEX]['servers'][$i]))")
@@ -1039,6 +1394,8 @@ sync_to_servers() {
             # 展开路径中的~
             if [[ "$AUTH_TYPE" = "ssh" ]]; then
                 AUTH_INFO=$(expand_path "$AUTH_INFO")
+            elif [[ "$AUTH_TYPE" = "password" ]]; then
+                AUTH_INFO=$(resolve_secret "$AUTH_INFO" "servers[$i].auth_info")
             fi
         fi
 
@@ -1062,11 +1419,7 @@ sync_to_servers() {
 
         # 切换到正确的分支
         cd "$LOCAL_DIR"
-        if [ "$VERBOSE" = true ]; then
-            git checkout "$SERVER_BRANCH" || true  # 忽略错误，避免 set -e 导致退出
-        else
-            safe_git_command "正在切换到目标分支 $SERVER_BRANCH" "checkout" "$SERVER_BRANCH" || true
-        fi
+        safe_git_command "checkout $SERVER_BRANCH" checkout "$SERVER_BRANCH" || true
 
         # 提取主机名（不包含用户名）用于连接测试
         SERVER_HOSTNAME=$(echo "$SERVER_HOST" | cut -d '@' -f 2)
@@ -1112,7 +1465,7 @@ sync_to_servers() {
                     log_error "修复权限后 SSH 连接仍然失败"
 
                     # 询问是否跳过代理
-                    read -p "是否尝试使用无代理模式连接? (y/n): " direct_conn_choice
+                    sync_prompt direct_conn_choice "是否尝试使用无代理模式连接? (y/n): " "y"
                     if [ "$direct_conn_choice" = "y" ] || [ "$direct_conn_choice" = "Y" ]; then
                         log_info "用户选择尝试无代理模式直接连接"
                         # 确保所有可能的代理变量都被清除
@@ -1122,9 +1475,9 @@ sync_to_servers() {
                         ssh -v -i "$AUTH_INFO" -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$SERVER_HOST" "echo 调试模式连接成功" 2>&1
 
                         # 询问是否跳过此服务器
-                        read -p "是否仍然要尝试继续同步? (y/n): " force_sync_choice
+                        sync_prompt force_sync_choice "是否仍然要尝试继续同步? (y/n): " "y"
                         if [ "$force_sync_choice" != "y" ] && [ "$force_sync_choice" != "Y" ]; then
-                            read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
+                            sync_prompt skip_choice "是否跳过此服务器并继续同步其他服务器? (y/n): " "n"
                             if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
                                 log_warn "跳过服务器 $SERVER_NAME"
                                 continue
@@ -1148,7 +1501,7 @@ sync_to_servers() {
                         fi
                     else
                         # 询问是否跳过此服务器
-                        read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
+                        sync_prompt skip_choice "是否跳过此服务器并继续同步其他服务器? (y/n): " "n"
                         if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
                             log_warn "跳过服务器 $SERVER_NAME"
                             continue
@@ -1178,7 +1531,7 @@ sync_to_servers() {
             fi
 
             # 使用无代理环境变量的SSH命令
-            RSYNC_SSH_OPTS="-e \"ssh -i $AUTH_INFO -o StrictHostKeyChecking=no\""
+            RSYNC_SSH_OPTS="-e \"ssh -i $AUTH_INFO -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR\""
         elif [ "$AUTH_TYPE" = "password" ]; then
             # 检查sshpass是否可用
             if ! command -v sshpass >/dev/null 2>&1; then
@@ -1189,7 +1542,7 @@ sync_to_servers() {
                 echo -e "  ${CYAN}macOS:${NC} ${BLUE}brew install hudochenkov/sshpass/sshpass${NC}"
 
                 # 询问是否跳过此服务器
-                read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
+                sync_prompt skip_choice "是否跳过此服务器并继续同步其他服务器? (y/n): " "n"
                 if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
                     log_warn "跳过服务器 $SERVER_NAME"
                     continue
@@ -1219,7 +1572,6 @@ sync_to_servers() {
             if [ "$VERBOSE" = true ]; then
                 echo -e "  ${CYAN}[DEBUG]${NC} 测试 SSH 连接到 $SERVER_HOST..."
                 echo -e "  ${CYAN}[DEBUG]${NC} 密码长度: ${#AUTH_INFO} 字符"
-                echo -e "  ${CYAN}[DEBUG]${NC} 密码前3字符: ${AUTH_INFO:0:3}***"
                 sshpass -p "$AUTH_INFO" ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "echo 连接成功"
                 local ssh_result=$?
                 echo -e "  ${CYAN}[DEBUG]${NC} SSH 返回码: $ssh_result"
@@ -1236,7 +1588,7 @@ sync_to_servers() {
                 echo -e "  4. ${CYAN}是否存在网络代理问题${NC}"
 
                 # 询问是否跳过代理
-                read -p "是否尝试使用无代理模式连接? (y/n): " direct_conn_choice
+                sync_prompt direct_conn_choice "是否尝试使用无代理模式连接? (y/n): " "y"
                 if [ "$direct_conn_choice" = "y" ] || [ "$direct_conn_choice" = "Y" ]; then
                     log_info "用户选择尝试无代理模式直接连接 (密码认证)"
                     # 确保所有可能的代理变量都被清除
@@ -1250,9 +1602,9 @@ sync_to_servers() {
                     rm -f "$temp_debug_pass_file"
 
                     # 询问是否仍然尝试同步
-                    read -p "是否仍然要尝试继续同步? (y/n): " force_sync_choice
+                    sync_prompt force_sync_choice "是否仍然要尝试继续同步? (y/n): " "y"
                     if [ "$force_sync_choice" != "y" ] && [ "$force_sync_choice" != "Y" ]; then
-                        read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
+                        sync_prompt skip_choice "是否跳过此服务器并继续同步其他服务器? (y/n): " "n"
                         if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
                             log_warn "跳过服务器 $SERVER_NAME"
                             continue
@@ -1276,7 +1628,7 @@ sync_to_servers() {
                     fi
                 else
                     # 询问是否跳过此服务器
-                    read -p "是否跳过此服务器并继续同步其他服务器? (y/n): " skip_choice
+                    sync_prompt skip_choice "是否跳过此服务器并继续同步其他服务器? (y/n): " "n"
                     if [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ]; then
                             log_warn "跳过服务器 $SERVER_NAME"
                         continue
@@ -1306,7 +1658,7 @@ sync_to_servers() {
             TEMP_RSYNC_PASS_FILE=$(mktemp)
             echo "$AUTH_INFO" > "$TEMP_RSYNC_PASS_FILE"
             chmod 600 "$TEMP_RSYNC_PASS_FILE"
-            RSYNC_SSH_OPTS="-e \"sshpass -f '$TEMP_RSYNC_PASS_FILE' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\""
+            RSYNC_SSH_OPTS="-e \"sshpass -f '$TEMP_RSYNC_PASS_FILE' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR\""
         else
             log_error "服务器 $SERVER_NAME 的认证类型 $AUTH_TYPE 不支持，必须为 'ssh' 或 'password'"
             exit 1
@@ -1370,83 +1722,100 @@ sync_to_servers() {
                 files_to_upload+=("$replaced_file")
             fi
         done
+
+        # 按 exclude 过滤上传列表
+        if [ ${#files_to_upload[@]} -gt 0 ] && [ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]; then
+            local filtered_upload=()
+            local skipped_upload=0
+            for file in "${files_to_upload[@]}"; do
+                if is_excluded "$file"; then
+                    skipped_upload=$((skipped_upload + 1))
+                    if [ "$VERBOSE" = true ]; then
+                        echo -e "  ${YELLOW}[-]${NC} 排除上传: $file"
+                    fi
+                else
+                    filtered_upload+=("$file")
+                fi
+            done
+            files_to_upload=("${filtered_upload[@]}")
+            if [ $skipped_upload -gt 0 ]; then
+                echo -e "  ${YELLOW}[!]${NC} 已按排除规则跳过上传 ${CYAN}${skipped_upload}${NC} 个文件"
+            fi
+        fi
         
         # 3. 判断同步策略
+        RSYNC_CMD=""
+        SYNC_FILES_LIST=""
+        local do_full_sync=false
+        local full_sync_reason=""
+
         if [ "$FORCE_SYNC" = true ]; then
-            # 强制同步：使用智能比对同步所有 Git 文件
-            echo -e "  ${CYAN}[i]${NC} 强制同步模式，使用智能比对同步所有 Git 管理的文件"
-            
-            # 切换到本地目录
-            cd "$LOCAL_DIR"
-            
-            # 获取当前分支的所有 Git 文件
-            git checkout "$SERVER_BRANCH" >/dev/null 2>&1 || true
-            local all_git_files=$(git ls-files)
-            
-            # 创建文件列表
-            local temp_file_list=$(mktemp)
-            echo "$all_git_files" > "$temp_file_list"
-            
-            # 添加 Replace 替换的文件
-            for replaced_file in "${REPLACED_FILES[@]}"; do
-                echo "$replaced_file" >> "$temp_file_list"
-            done
-            
-            # 使用 rsync --checksum 智能比对，只上传有差异的文件
-            echo -e "  ${YELLOW}[→]${NC} 智能比对中..."
-            
-            if [ -n "$LOG_FILE" ]; then
-                echo "  强制同步模式，智能比对同步" >> "$LOG_FILE"
-            fi
-            
-            # 统计文件数量
-            local file_count=$(wc -l < "$temp_file_list" | tr -d ' ')
-            echo -e "  ${CYAN}[i]${NC} 将检查 ${CYAN}${file_count}${NC} 个文件（使用 checksum 比对）"
-            
-            # 构建 rsync 命令（使用 --checksum 比对，--files-from 指定文件列表）
-            RSYNC_CMD="rsync -azc --files-from=\"$temp_file_list\" $RSYNC_SSH_OPTS \"$LOCAL_DIR/\" \"$SERVER_HOST:$TARGET_DIR/\""
-            SYNC_FILES_LIST="$temp_file_list"
-            
+            do_full_sync=true
+            full_sync_reason="强制同步"
         elif [ "$is_first_clone" = "true" ]; then
-            # 首次克隆：使用智能比对同步所有 Git 文件
-            echo -e "  ${CYAN}[i]${NC} 首次克隆，使用智能比对同步 Git 管理的文件"
-            
-            # 切换到本地目录
-            cd "$LOCAL_DIR"
-            
-            # 获取当前分支的所有 Git 文件
-            git checkout "$SERVER_BRANCH" >/dev/null 2>&1
-            local all_git_files=$(git ls-files)
-            
-            # 创建文件列表
-            local temp_file_list=$(mktemp)
-            echo "$all_git_files" > "$temp_file_list"
-            
-            # 添加 Replace 替换的文件
-            for replaced_file in "${REPLACED_FILES[@]}"; do
-                echo "$replaced_file" >> "$temp_file_list"
-            done
-            
-            # 使用 rsync --checksum 智能比对，只上传有差异的文件
-            echo -e "  ${YELLOW}[→]${NC} 智能比对中..."
-            
-            if [ -n "$LOG_FILE" ]; then
-                echo "  首次克隆，智能比对同步" >> "$LOG_FILE"
+            do_full_sync=true
+            full_sync_reason="首次克隆"
+        elif [ ${#files_to_upload[@]} -eq 0 ] && [ -z "$deleted_files" ]; then
+            # 本地无变更：抽样检查远端是否完整（防止目标被清空后误报成功）
+            echo -e "  ${CYAN}[i]${NC} 本地无 Git 变更，检查远端完整性..."
+            cd "$LOCAL_DIR" || {
+                log_error "无法切换到本地目录: $LOCAL_DIR"
+                continue
+            }
+            git checkout "$SERVER_BRANCH" >/dev/null 2>&1 || true
+
+            local sample_files=()
+            while IFS= read -r file; do
+                [ -z "$file" ] && continue
+                is_excluded "$file" && continue
+                sample_files+=("$file")
+                [ ${#sample_files[@]} -ge 8 ] && break
+            done < <(git ls-files)
+
+            if [ ${#sample_files[@]} -eq 0 ]; then
+                echo -e "  ${YELLOW}[!]${NC} 本地无可同步的 Git 文件，跳过"
+                if [ -n "$LOG_FILE" ]; then
+                    echo "  跳过同步: 无 Git 文件" >> "$LOG_FILE"
+                fi
+                continue
             fi
-            
-            # 构建 rsync 命令（使用 --checksum 比对，--files-from 指定文件列表）
+
+            if remote_missing_samples "${sample_files[@]}"; then
+                do_full_sync=true
+                full_sync_reason="远端不完整（可能被清空）"
+            else
+                echo -e "  ${YELLOW}[!]${NC} 无变更且远端完整，跳过同步"
+                if [ -n "$LOG_FILE" ]; then
+                    echo "  跳过同步: 无变更且远端完整" >> "$LOG_FILE"
+                fi
+                continue
+            fi
+        fi
+
+        if [ "$do_full_sync" = true ]; then
+            echo -e "  ${CYAN}[i]${NC} ${full_sync_reason}，全量智能比对 Git 管理的文件"
+
+            local temp_file_list=$(mktemp)
+            local skip_count
+            skip_count=$(build_full_sync_list "$temp_file_list")
+
+            if [ -n "$skip_count" ] && [ "$skip_count" -gt 0 ] 2>/dev/null; then
+                echo -e "  ${YELLOW}[!]${NC} 已排除 ${CYAN}${skip_count}${NC} 个文件"
+            fi
+
+            echo -e "  ${YELLOW}[→]${NC} 智能比对中..."
+            if [ -n "$LOG_FILE" ]; then
+                echo "  ${full_sync_reason}，智能比对同步" >> "$LOG_FILE"
+            fi
+
+            local file_count
+            file_count=$(wc -l < "$temp_file_list" | tr -d ' ')
+            echo -e "  ${CYAN}[i]${NC} 将检查 ${CYAN}${file_count}${NC} 个文件（使用 checksum 比对）"
+
             RSYNC_CMD="rsync -azc --files-from=\"$temp_file_list\" $RSYNC_SSH_OPTS \"$LOCAL_DIR/\" \"$SERVER_HOST:$TARGET_DIR/\""
             SYNC_FILES_LIST="$temp_file_list"
-            
-        elif [ ${#files_to_upload[@]} -eq 0 ] && [ -z "$deleted_files" ]; then
-            # 无变更
-            echo -e "  ${YELLOW}[!]${NC} 无变更，跳过同步"
-            if [ -n "$LOG_FILE" ]; then
-                echo "  跳过同步: 无变更" >> "$LOG_FILE"
-            fi
-            continue
-            
-        else
+
+        elif [ ${#files_to_upload[@]} -gt 0 ] || [ -n "$deleted_files" ]; then
             # 有变更：智能同步
             echo -e "  ${CYAN}[i]${NC} 检测到变更，准备同步..."
             
@@ -1612,16 +1981,7 @@ sync_to_servers() {
             
             for file in "${DELETED_FILES_LIST[@]}"; do
                 # 检查文件是否在 exclude 列表中
-                local should_skip=false
-                for exclude_pattern in $EXCLUDE_OPTS; do
-                    local pattern=$(echo "$exclude_pattern" | sed 's/--exclude=//')
-                    if [[ "$file" == $pattern* ]]; then
-                        should_skip=true
-                        break
-                    fi
-                done
-                
-                if [ "$should_skip" = true ]; then
+                if is_excluded "$file"; then
                     echo -e "    ${YELLOW}[-]${NC} 跳过 (在排除列表中): $file"
                     if [ -n "$LOG_FILE" ]; then
                         echo "    跳过删除 (excluded): $file" >> "$LOG_FILE"
@@ -1681,7 +2041,7 @@ sync_to_servers() {
             echo -e "  ${YELLOW}30+:${NC} SSH或shell错误"
 
             # 询问是否继续同步其他服务器
-            read -p "是否继续同步其他服务器? (y/n): " continue_choice
+            sync_prompt continue_choice "是否继续同步其他服务器? (y/n): " "y"
             if [ "$continue_choice" = "y" ] || [ "$continue_choice" = "Y" ]; then
                 log_warn "用户选择在当前错误后继续同步其他服务器"
                 continue
@@ -1738,40 +2098,58 @@ execute_post_sync_commands() {
         COMMAND_LIST=()
         COMMAND_SOURCE=""  # 记录命令来源
 
-        # 服务器级别命令
-        while IFS= read -r line; do
-            [ -n "$line" ] && COMMAND_LIST+=("$line")
-        done < <(yq e ".server_groups[$GROUP_INDEX].servers[$server_index].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
-        
-        if [ ${#COMMAND_LIST[@]} -gt 0 ]; then
-            COMMAND_SOURCE="服务器级别"
-        fi
-
-        # 如果服务器级别没有配置，再尝试服务器组级别
-        if [ ${#COMMAND_LIST[@]} -eq 0 ]; then
+        # 若指定了命令文件，优先使用（Web 勾选场景）
+        if [ -n "$POST_COMMANDS_FILE" ] && [ -f "$POST_COMMANDS_FILE" ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+                [ -n "$line" ] && COMMAND_LIST+=("$line")
+            done < "$POST_COMMANDS_FILE"
+            COMMAND_SOURCE="自定义选择"
+        else
+            # 服务器级别命令
             while IFS= read -r line; do
                 [ -n "$line" ] && COMMAND_LIST+=("$line")
-            done < <(yq e ".server_groups[$GROUP_INDEX].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
+            done < <(yq e ".server_groups[$GROUP_INDEX].servers[$server_index].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
             
             if [ ${#COMMAND_LIST[@]} -gt 0 ]; then
-                COMMAND_SOURCE="服务器组级别"
+                COMMAND_SOURCE="服务器级别"
+            fi
+
+            # 如果服务器级别没有配置，再尝试服务器组级别
+            if [ ${#COMMAND_LIST[@]} -eq 0 ]; then
+                while IFS= read -r line; do
+                    [ -n "$line" ] && COMMAND_LIST+=("$line")
+                done < <(yq e ".server_groups[$GROUP_INDEX].post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
+                
+                if [ ${#COMMAND_LIST[@]} -gt 0 ]; then
+                    COMMAND_SOURCE="服务器组级别"
+                fi
+            fi
+
+            # 如果服务器组级别也没有，再使用全局默认命令
+            if [ ${#COMMAND_LIST[@]} -eq 0 ]; then
+                while IFS= read -r line; do
+                    [ -n "$line" ] && COMMAND_LIST+=("$line")
+                done < <(yq e ".default_post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
+                
+                if [ ${#COMMAND_LIST[@]} -gt 0 ]; then
+                    COMMAND_SOURCE="全局默认"
+                fi
             fi
         fi
 
-        # 如果服务器组级别也没有，再使用全局默认命令
-        if [ ${#COMMAND_LIST[@]} -eq 0 ]; then
-            while IFS= read -r line; do
-                [ -n "$line" ] && COMMAND_LIST+=("$line")
-            done < <(yq e ".default_post_sync_commands[]?" "$CONFIG_FILE" 2>/dev/null)
-            
-            if [ ${#COMMAND_LIST[@]} -gt 0 ]; then
-                COMMAND_SOURCE="全局默认"
-            fi
-        fi
-
-        # 展开路径中的~
+        # 展开路径 / 解析密码引用
         if [[ "$AUTH_TYPE" = "ssh" ]]; then
             AUTH_INFO=$(expand_path "$AUTH_INFO")
+        elif [[ "$AUTH_TYPE" = "password" ]]; then
+            AUTH_INFO=$(resolve_secret "$AUTH_INFO" "post_sync.auth_info")
+            if [ -z "$AUTH_INFO" ]; then
+                log_error "服务器 $SERVER_NAME 密码为空，无法执行同步后命令"
+                return 1
+            fi
+            if ! command -v sshpass >/dev/null 2>&1; then
+                log_error "同步后命令需要 sshpass（密码认证），请先安装"
+                return 1
+            fi
         fi
     else
         # 使用Python解析（简化版本，主要支持yq）
@@ -1803,12 +2181,31 @@ execute_post_sync_commands() {
     done
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-    # 询问用户执行方式
-    echo -e "${YELLOW}请选择执行方式：${NC}"
-    echo -e "  ${GREEN}[1]${NC} 执行所有命令"
-    echo -e "  ${GREEN}[2]${NC} 逐个确认执行"
-    echo -e "  ${GREEN}[3]${NC} 跳过所有命令"
-    read -p "请输入选择 (1/2/3): " execute_mode
+    # 解析执行方式：--post-sync 优先，否则交互询问（-y 默认全部执行）
+    local execute_mode=""
+    case "$PRESET_POST_SYNC" in
+        1|all) execute_mode="1" ;;
+        2|ask) execute_mode="2" ;;
+        3|skip) execute_mode="3" ;;
+    esac
+    # 自定义命令文件视为已选定，直接全部执行
+    if [ -n "$POST_COMMANDS_FILE" ] && [ -f "$POST_COMMANDS_FILE" ]; then
+        execute_mode="1"
+    fi
+
+    if [ -z "$execute_mode" ]; then
+        echo -e "${YELLOW}请选择执行方式：${NC}"
+        echo -e "  ${GREEN}[1]${NC} 执行所有命令"
+        echo -e "  ${GREEN}[2]${NC} 逐个确认执行"
+        echo -e "  ${GREEN}[3]${NC} 跳过所有命令"
+        sync_prompt execute_mode "请输入选择 (1/2/3): " "1"
+    else
+        case "$execute_mode" in
+            1) echo -e "${CYAN}[i]${NC} 同步后命令模式: 执行所有" ;;
+            2) echo -e "${CYAN}[i]${NC} 同步后命令模式: 逐个确认" ;;
+            3) echo -e "${CYAN}[i]${NC} 同步后命令模式: 跳过所有" ;;
+        esac
+    fi
 
     case "$execute_mode" in
         1)
@@ -1841,7 +2238,7 @@ execute_post_sync_commands() {
             # 如果是逐个确认模式，询问用户
             if [ "$execute_mode" = "2" ]; then
                 echo -e "${YELLOW}准备执行命令 [${CYAN}$cmd_index${NC}${YELLOW}]:${NC} $processed_command"
-                read -p "是否执行此命令? (y/n/q): " cmd_choice
+                sync_prompt cmd_choice "是否执行此命令? (y/n/q): " "y"
                 case "$cmd_choice" in
                     y|Y)
                         ;;
@@ -1866,7 +2263,7 @@ execute_post_sync_commands() {
             if echo "$processed_command" | grep -qE "$interactive_keywords"; then
                 is_interactive=true
                 echo -e "${YELLOW}  ⚠ 检测到可能的交互式命令${NC}"
-                read -p "  是否需要交互? (y/n, 默认n): " need_interactive
+                sync_prompt need_interactive "  是否需要交互? (y/n, 默认n): " "n"
                 if [ "$need_interactive" = "y" ] || [ "$need_interactive" = "Y" ]; then
                     is_interactive=true
                 else
@@ -1874,75 +2271,101 @@ execute_post_sync_commands() {
                 fi
             fi
 
+            # SSH 静默选项（密码认证绝不能加 BatchMode=yes，否则会禁用密码导致 255）
+            local SSH_QUIET_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15"
+            local SSH_KEY_OPTS="$SSH_QUIET_OPTS -o BatchMode=yes"
+            # password + keyboard-interactive：兼容部分云主机/宝塔只开交互式密码
+            local SSH_PASS_OPTS="$SSH_QUIET_OPTS -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1"
+
             # 如果是交互式命令，直接执行
             if [ "$is_interactive" = true ]; then
                 echo -e "${CYAN}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                 
-                # 直接执行，不重定向输出
                 if [ "$AUTH_TYPE" = "ssh" ]; then
-                    ssh -i "$AUTH_INFO" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -t "$SERVER_HOST" "$processed_command"
+                    ssh -i "$AUTH_INFO" $SSH_QUIET_OPTS -t "$SERVER_HOST" "$processed_command"
                     local cmd_exit_code=$?
                 elif [ "$AUTH_TYPE" = "password" ]; then
-                    local temp_cmd_pass_file=$(mktemp)
-                    echo "$AUTH_INFO" > "$temp_cmd_pass_file"
-                    chmod 600 "$temp_cmd_pass_file"
-                    sshpass -f "$temp_cmd_pass_file" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -t "$SERVER_HOST" "$processed_command"
-                    local cmd_exit_code=$?
-                    rm -f "$temp_cmd_pass_file"
+                    if ! command -v sshpass >/dev/null 2>&1; then
+                        log_error "密码认证需要 sshpass，但未安装"
+                        local cmd_exit_code=255
+                    else
+                        local temp_cmd_pass_file=$(mktemp)
+                        printf '%s\n' "$AUTH_INFO" > "$temp_cmd_pass_file"
+                        chmod 600 "$temp_cmd_pass_file"
+                        sshpass -f "$temp_cmd_pass_file" ssh $SSH_PASS_OPTS -t "$SERVER_HOST" "$processed_command"
+                        local cmd_exit_code=$?
+                        rm -f "$temp_cmd_pass_file"
+                    fi
+                else
+                    log_error "不支持的认证类型: $AUTH_TYPE"
+                    local cmd_exit_code=255
                 fi
                 
                 echo -e "${CYAN}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
             else
-                # 非交互式命令，使用滚动显示
-                # 创建临时文件存储命令输出
+                # 非交互式：有真实输出才滚屏；chown 等无输出命令只显示结果
                 local temp_cmd_output=$(mktemp)
+                local temp_cmd_pass_file=""
+                local cmd_pid=""
                 
-                # 根据认证类型在后台执行远程命令
                 if [ "$AUTH_TYPE" = "ssh" ]; then
-                    ssh -i "$AUTH_INFO" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "$processed_command" > "$temp_cmd_output" 2>&1 &
-                    local cmd_pid=$!
+                    ssh -i "$AUTH_INFO" $SSH_KEY_OPTS "$SERVER_HOST" "$processed_command" > "$temp_cmd_output" 2>&1 &
+                    cmd_pid=$!
                 elif [ "$AUTH_TYPE" = "password" ]; then
-                    local temp_cmd_pass_file=$(mktemp)
-                    echo "$AUTH_INFO" > "$temp_cmd_pass_file"
-                    chmod 600 "$temp_cmd_pass_file"
-                    sshpass -f "$temp_cmd_pass_file" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SERVER_HOST" "$processed_command" > "$temp_cmd_output" 2>&1 &
-                    local cmd_pid=$!
+                    if ! command -v sshpass >/dev/null 2>&1; then
+                        echo "密码认证需要 sshpass，但未安装" > "$temp_cmd_output"
+                        local cmd_exit_code=255
+                        cmd_pid=""
+                    else
+                        temp_cmd_pass_file=$(mktemp)
+                        printf '%s\n' "$AUTH_INFO" > "$temp_cmd_pass_file"
+                        chmod 600 "$temp_cmd_pass_file"
+                        sshpass -f "$temp_cmd_pass_file" ssh $SSH_PASS_OPTS "$SERVER_HOST" "$processed_command" > "$temp_cmd_output" 2>&1 &
+                        cmd_pid=$!
+                    fi
+                else
+                    echo "不支持的认证类型: $AUTH_TYPE" > "$temp_cmd_output"
+                    local cmd_exit_code=255
+                    cmd_pid=""
                 fi
 
-                # 灰色文字滚动显示命令输出
                 local GRAY='\033[0;90m'
                 local display_lines=10
+                local started_scroll=false
                 
-                # 预留显示空间
-                for ((j=0; j<$display_lines; j++)); do
-                    echo ""
-                done
-                
-                # 实时显示命令输出
+                if [ -n "$cmd_pid" ]; then
                 while kill -0 $cmd_pid 2>/dev/null; do
-                    # 向上移动光标
+                    # 过滤 SSH 噪音后再决定是否展示
+                    local clean_output
+                    clean_output=$(grep -vE 'Permanently added|^$' "$temp_cmd_output" 2>/dev/null || true)
+                    if [ -z "$clean_output" ]; then
+                        sleep 0.15
+                        continue
+                    fi
+                    if [ "$started_scroll" = false ]; then
+                        for ((j=0; j<$display_lines; j++)); do
+                            echo ""
+                        done
+                        started_scroll=true
+                    fi
+
                     for ((j=0; j<$display_lines; j++)); do
                         printf "\033[1A"
                     done
                     
-                    # 获取最新的输出（最后10行）
-                    local output_lines=$(tail -n $display_lines "$temp_cmd_output" 2>/dev/null)
+                    local output_lines
+                    output_lines=$(printf '%s\n' "$clean_output" | tail -n $display_lines)
                     
                     local line_num=0
                     while IFS= read -r line && [ $line_num -lt $display_lines ]; do
-                        printf "\033[K"  # 清除当前行
-                        
-                        # 截断过长的行
+                        printf "\033[K"
                         if [ ${#line} -gt 75 ]; then
                             line="${line:0:72}..."
                         fi
-                        
-                        # 显示灰色输出
                         echo -e "${GRAY}  │ $line${NC}"
                         line_num=$((line_num + 1))
                     done <<< "$output_lines"
                     
-                    # 补充空行
                     while [ $line_num -lt $display_lines ]; do
                         printf "\033[K\n"
                         line_num=$((line_num + 1))
@@ -1951,19 +2374,19 @@ execute_post_sync_commands() {
                     sleep 0.2
                 done
                 
-                # 等待命令完成
                 wait $cmd_pid
                 local cmd_exit_code=$?
                 
-                # 命令完成后清理密码文件（避免竞态条件）
-                if [ "$AUTH_TYPE" = "password" ] && [ -n "$temp_cmd_pass_file" ] && [ -f "$temp_cmd_pass_file" ]; then
+                if [ -n "$temp_cmd_pass_file" ] && [ -f "$temp_cmd_pass_file" ]; then
                     rm -f "$temp_cmd_pass_file"
                 fi
                 
-                # 清除滚动显示区域
-                for ((j=0; j<$display_lines; j++)); do
-                    printf "\033[1A\033[K"
-                done
+                if [ "$started_scroll" = true ]; then
+                    for ((j=0; j<$display_lines; j++)); do
+                        printf "\033[1A\033[K"
+                    done
+                fi
+                fi
             fi
             
             # 统一的结果显示和错误处理
@@ -1982,6 +2405,9 @@ execute_post_sync_commands() {
                     tail -n 5 "$temp_cmd_output" 2>/dev/null | while IFS= read -r line; do
                         echo "    $line"
                     done
+                    if grep -q "Permission denied" "$temp_cmd_output" 2>/dev/null; then
+                        echo -e "  ${YELLOW}提示:${NC} SSH 认证失败。请核对服务器 auth_type / auth_info（密码须已解析，且本机已装 sshpass）"
+                    fi
                     
                     if [ -n "$LOG_FILE" ]; then
                         echo "  命令 [$cmd_index] 执行失败" >> "$LOG_FILE"
@@ -1991,7 +2417,7 @@ execute_post_sync_commands() {
                 fi
                 
                 if [ "$execute_mode" = "1" ]; then
-                    read -p "是否继续执行其他命令? (y/n): " continue_cmd_choice
+                    sync_prompt continue_cmd_choice "是否继续执行其他命令? (y/n): " "y"
                     if [ "$continue_cmd_choice" != "y" ] && [ "$continue_cmd_choice" != "Y" ]; then
                         echo -e "${YELLOW}[!]${NC} 停止执行后续命令"
                         should_break=true
@@ -2032,10 +2458,7 @@ cleanup_credentials() {
 
 # 主函数
 main() {
-    echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Gitee 代码同步工具 v1.1         ║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
-    echo ""
+    print_run_header
 
     check_dependencies
     select_config_file
@@ -2046,14 +2469,7 @@ main() {
     sync_to_servers
     cleanup_credentials
 
-    echo ""
-    echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║  ✓ 同步完成！                         ║${NC}"
-    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
-    if [ -n "$LOG_FILE" ]; then
-        echo -e "${CYAN}详细日志:${NC} $LOG_FILE"
-    fi
-    echo ""
+    print_run_footer
 }
 
 # 执行主函数

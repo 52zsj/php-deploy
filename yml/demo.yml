@@ -1,6 +1,6 @@
-# Gitee代码同步工具配置文件
+# GitShip 配置文件（YAML 键名 gitee 为历史兼容，可指向任意 Git 远端）
 gitee:
-  # Gitee仓库URL
+  # 仓库 URL（Gitee / GitHub / GitLab 等）
   repo_url: "https://gitee.com/example/demo-project.git"
   # 默认分支
   default_branch: "develop"
@@ -10,17 +10,14 @@ gitee:
   auth_type: "password"
   # 用户名和密码（如果auth_type为password）
   username: "username"
-  password: "password"
+  password: "secret:GITEE_PASSWORD"
   # SSH密钥路径（如果auth_type为ssh）
   # ssh_key: "~/.ssh/id_rsa"
-
 # 同步选项
 sync:
   rsync_options: "-az --progress"
-  
-  # 排除目录（删除操作时会跳过）
+  # 排除目录（点开头目录已内置过滤，无需再列 .git/.cursor 等）
   exclude:
-    - ".git"
     - "node_modules"
     - "vendor"
     - "*.log"
@@ -33,16 +30,13 @@ sync:
     - "data/"
     - "*.pid"
     - "*.lock"
-  
   # 配置替换目录
-  replace_dir: "~/replace/demo"
-
+  replace_dir: "./replace/demo"
 # 全局默认的同步后执行命令（优先级最低）
 default_post_sync_commands:
-  - "chown -R www-data:www-data {target_dir}"
+  - "chown -R www:www {target_dir}"
   - "find {target_dir} -type d -exec chmod 755 {} \\;"
   - "find {target_dir} -type f -exec chmod 644 {} \\;"
-
 # 服务器组
 server_groups:
   - name: "测试环境"
@@ -57,7 +51,7 @@ server_groups:
     servers:
       - name: "测试服务器1"
         host: "user@test-server1"
-        target_dir: "/var/www/demo"
+        target_dir: "/www/wwwroot/demo"
         branch: "develop"
         auth_type: "ssh"
         auth_info: "~/.ssh/id_rsa"
@@ -68,12 +62,11 @@ server_groups:
           - "systemctl restart httpd"
       - name: "测试服务器2"
         host: "user@test-server2"
-        target_dir: "/var/www/demo"
+        target_dir: "/www/wwwroot/demo"
         branch: "develop"
         auth_type: "password"
-        auth_info: "server_password"
+        auth_info: "secret:SERVER_____2"
         # 不配置，使用服务器组的权限设置
-
   - name: "生产环境"
     # 环境标识，用于选择配置替换目录
     env: "product"
@@ -81,14 +74,14 @@ server_groups:
     servers:
       - name: "生产服务器1"
         host: "user@prod-server1"
-        target_dir: "/var/www/demo"
+        target_dir: "/www/wwwroot/demo"
         branch: "master"
         auth_type: "ssh"
         auth_info: "~/.ssh/id_rsa"
         # 使用全局默认权限设置
       - name: "生产服务器2"
         host: "user@prod-server2"
-        target_dir: "/var/www/demo"
+        target_dir: "/www/wwwroot/demo"
         branch: "master"
         auth_type: "ssh"
         auth_info: "~/.ssh/id_rsa"

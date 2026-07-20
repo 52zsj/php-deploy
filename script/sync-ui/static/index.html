@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitShip</title>
+  <link rel="stylesheet" href="/static/style.css?v=20260720b">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-icon">⇄</span>
+        <div>
+          <h1>GitShip</h1>
+          <p>Git 拉取 · 多机同步</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <select id="configSelect" class="select-sm">
+          <option value="">选择配置…</option>
+        </select>
+        <button type="button" class="btn ghost" id="demoBtn">Demo</button>
+        <span class="status-badge" id="saveStatus">就绪</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="form-panel">
+        <div class="panel-tabs">
+          <button type="button" class="tab active" data-tab="config">配置</button>
+          <button type="button" class="tab" data-tab="replace">Replace</button>
+        </div>
+        <div class="form-scroll" id="tabConfig">
+          <form id="configForm">
+            <section class="block">
+              <h2>基础</h2>
+              <div class="field">
+                <label for="configName">配置名</label>
+                <input id="configName" required placeholder="myproject">
+                <p class="field-hint">自动使用 ./replace/配置名 与 /tmp/配置名（可在高级里改）</p>
+              </div>
+            </section>
+
+            <section class="block">
+              <h2>Git 仓库</h2>
+              <div class="field">
+                <label for="repoUrl">仓库 URL</label>
+                <input id="repoUrl" required placeholder="https://gitee.com/user/repo.git">
+              </div>
+              <div class="grid-2">
+                <div class="field">
+                  <label for="defaultBranch">默认分支</label>
+                  <input id="defaultBranch" value="develop">
+                </div>
+                <div class="field">
+                  <label for="localDir">本地目录</label>
+                  <input id="localDir" required placeholder="/tmp/myproject">
+                </div>
+              </div>
+              <div class="field">
+                <label>认证方式</label>
+                <div class="seg-control">
+                  <label><input type="radio" name="gitAuth" value="ssh" checked><span>SSH</span></label>
+                  <label><input type="radio" name="gitAuth" value="password"><span>密码</span></label>
+                </div>
+              </div>
+              <div class="field" id="gitSshField">
+                <label for="gitSshKey">SSH 密钥</label>
+                <input id="gitSshKey" value="~/.ssh/id_rsa">
+              </div>
+              <div class="grid-2 hidden" id="gitPasswordFields">
+                <div class="field">
+                  <label for="gitUsername">用户名</label>
+                  <input id="gitUsername">
+                </div>
+                <div class="field">
+                  <label for="gitPassword">Git 密码</label>
+                  <input id="gitPassword" type="text" autocomplete="off" spellcheck="false" placeholder="新密码（留空不改）">
+                  <p class="field-hint hidden" id="gitPasswordHint">已保存到 .secrets，界面不回显</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="block">
+              <div class="block-head">
+                <h2>服务器</h2>
+                <button type="button" class="btn ghost sm" id="addGroupBtn">+ 添加组</button>
+              </div>
+              <div id="groupsContainer"></div>
+            </section>
+
+            <details class="advanced-block">
+              <summary>高级选项</summary>
+              <div class="advanced-body">
+                <div class="field">
+                  <label for="rsyncOptions">rsync 参数</label>
+                  <input id="rsyncOptions" value="-az --progress">
+                </div>
+                <div class="field">
+                  <label for="excludeList">排除路径（每行一项）</label>
+                  <textarea id="excludeList" rows="4" placeholder="node_modules&#10;vendor&#10;runtime/"></textarea>
+                  <p class="field-hint">点开头目录（.git / .cursor / .idea / …）已内置过滤，无需再写</p>
+                </div>
+                <div class="field">
+                  <label for="replaceDir">Replace 目录（默认 ./replace/配置名）</label>
+                  <input id="replaceDir" placeholder="./replace/myproject">
+                </div>
+                <div class="field">
+                  <label for="defaultPostSync">全局同步后命令（可选）</label>
+                  <textarea id="defaultPostSync" rows="2" placeholder="chown -R www:www {target_dir}"></textarea>
+                </div>
+              </div>
+            </details>
+          </form>
+        </div>
+
+        <div class="form-scroll hidden" id="tabReplace">
+          <section class="block">
+            <h2>Replace 覆盖文件</h2>
+            <p class="field-hint">写入当前部署组 env；先填相对路径前缀，再上传文件 / 文件夹 / 压缩包（保留嵌套）。例：前缀 <code>application/</code> + 文件夹 <code>config</code> → <code>env/application/config/…</code></p>
+            <div class="replace-meta">
+              <span id="replaceDirView" class="mono-chip">—</span>
+              <span id="replaceEnvLabel" class="mono-chip">env: —</span>
+            </div>
+            <div class="field">
+              <label for="replacePrefix">相对路径前缀（相对仓库根，可空）</label>
+              <input id="replacePrefix" placeholder="application 或 application/config">
+            </div>
+            <label class="check">
+              <input type="checkbox" id="replaceStripTop" checked>
+              文件夹上传时去掉选中文件夹的顶层名
+            </label>
+            <div class="replace-toolbar">
+              <button type="button" class="btn secondary sm" id="replaceUploadFilesBtn">上传文件</button>
+              <button type="button" class="btn secondary sm" id="replaceUploadDirBtn">上传文件夹</button>
+              <button type="button" class="btn secondary sm" id="replaceUploadArchiveBtn">上传压缩包</button>
+              <button type="button" class="btn ghost sm" id="replaceRefreshBtn">刷新</button>
+              <button type="button" class="btn ghost sm" id="replaceSaveFileBtn">保存编辑</button>
+              <button type="button" class="btn ghost sm" id="replaceSelectAllBtn">全选</button>
+              <button type="button" class="btn danger sm" id="replaceDeleteSelectedBtn">删除选中</button>
+              <input type="file" id="replaceUploadFiles" class="hidden" multiple>
+              <input type="file" id="replaceUploadDir" class="hidden" webkitdirectory multiple>
+              <input type="file" id="replaceUploadArchive" class="hidden" accept=".zip,.tar,.tar.gz,.tgz,application/zip,application/x-tar,application/gzip">
+            </div>
+            <p class="field-hint">压缩包：.zip / .tar.gz / .tgz / .tar。允许上传 <code>.env</code> 等点文件；仍跳过 <code>.git</code> 等点目录。目录树可勾选批量删除（无确认）。</p>
+            <div class="replace-layout">
+              <div class="replace-file-list" id="replaceFileList"></div>
+              <div class="replace-editor-wrap">
+                <div class="field">
+                  <label for="replaceFilePath">相对路径（相对仓库根）</label>
+                  <input id="replaceFilePath" readonly placeholder="如 application/database.php">
+                </div>
+                <textarea id="replaceFileContent" class="replace-editor" placeholder="选择文件预览/微调…"></textarea>
+                <p class="field-hint" id="replaceFileStatus"></p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <footer class="form-footer">
+          <div class="footer-row">
+            <div class="field compact">
+              <label for="runGroup">部署组</label>
+              <select id="runGroup"></select>
+            </div>
+            <div class="field compact">
+              <label for="postSyncMode">同步后命令</label>
+              <select id="postSyncMode">
+                <option value="1">执行所有</option>
+                <option value="pick">勾选要执行的</option>
+                <option value="3">跳过所有</option>
+              </select>
+            </div>
+            <label class="check"><input type="checkbox" id="optVerbose"> 详细</label>
+            <label class="check"><input type="checkbox" id="optForce"> 强制</label>
+          </div>
+          <div id="postSyncPicker" class="post-sync-picker hidden">
+            <div class="picker-head">
+              <span>选择要执行的命令</span>
+              <button type="button" class="btn ghost sm" id="postSyncSelectAll">全选</button>
+            </div>
+            <div id="postSyncList" class="picker-list"></div>
+          </div>
+          <div class="footer-actions">
+            <button type="button" class="btn secondary" id="saveBtn">保存配置</button>
+            <button type="button" class="btn primary" id="runBtn">▶ 执行同步</button>
+          </div>
+        </footer>
+      </aside>
+
+      <section class="output-panel">
+        <div class="terminal-bar">
+          <div class="dots"><i></i><i></i><i></i></div>
+          <span class="terminal-title">sync.sh 输出</span>
+          <div class="terminal-actions">
+            <span class="status" id="runStatus">等待执行</span>
+            <button type="button" class="btn ghost sm hidden" id="scrollBottomBtn">回到底部</button>
+            <button type="button" class="btn ghost sm" id="clearOutputBtn">清空</button>
+          </div>
+        </div>
+        <div class="output-wrap">
+          <div id="output">
+            <div class="output-placeholder">点击「执行同步」开始，日志将在此实时显示</div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="groupTemplate">
+    <div class="card group-card">
+      <div class="card-head">
+        <strong>服务器组</strong>
+        <button type="button" class="btn danger sm remove-group">删除</button>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label>组名称</label>
+          <input class="group-name" placeholder="测试环境">
+        </div>
+        <div class="field">
+          <label>环境 env</label>
+          <input class="group-env" placeholder="develop">
+        </div>
+      </div>
+      <div class="field">
+        <label>组级同步后命令</label>
+        <textarea class="group-post-sync" rows="2"></textarea>
+      </div>
+      <div class="card-subhead">
+        <span>服务器</span>
+        <button type="button" class="btn ghost sm add-server">+ 添加</button>
+      </div>
+      <div class="servers-container"></div>
+    </div>
+  </template>
+
+  <template id="serverTemplate">
+    <div class="card server-card nested">
+      <div class="card-head">
+        <strong>节点</strong>
+        <button type="button" class="btn danger sm remove-server">删除</button>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label>名称</label>
+          <input class="server-name" placeholder="生产服务器1">
+        </div>
+        <div class="field">
+          <label>主机 user@host</label>
+          <input class="server-host" placeholder="root@xxx.xxx.xxx.xxx">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label>目标目录</label>
+          <input class="server-target" placeholder="/www/wwwroot/项目名" value="">
+        </div>
+        <div class="field">
+          <label>分支</label>
+          <input class="server-branch" placeholder="master">
+        </div>
+      </div>
+      <div class="field">
+        <label>认证</label>
+        <div class="seg-control server-auth-row">
+          <label><input type="radio" class="server-auth-type" value="ssh" checked><span>密钥</span></label>
+          <label><input type="radio" class="server-auth-type" value="password"><span>密码</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label>auth_info（密钥路径；密码认证时填新密码）</label>
+        <input class="server-auth-info" placeholder="~/.ssh/id_rsa" autocomplete="off" spellcheck="false">
+        <p class="field-hint server-auth-hint hidden">密码已保存到 .secrets，界面不回显</p>
+      </div>
+      <div class="field">
+        <label>同步后命令</label>
+        <textarea class="server-post-sync" rows="2"></textarea>
+      </div>
+    </div>
+  </template>
+
+  <script src="/static/app.js?v=20260720i"></script>
+</body>
+</html>

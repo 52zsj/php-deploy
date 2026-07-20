@@ -1,3 +1,17 @@
 .credentials/
 *.git-credentials
+.secrets/
 .idea
+
+# 打包产物
+dist/
+script/pack/launcher/payload.tar.gz
+
+# docker 本地数据（保留空目录 .gitkeep）
+data/**
+!data/**/
+!data/**/.gitkeep
+
+# 项目配置：仅提交 demo 模板，其余 yml 为本地/生产配置不入库
+yml/*
+!yml/demo.yml

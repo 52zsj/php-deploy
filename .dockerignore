@@ -1,0 +1,37 @@
+# 构建上下文：只打框架，排除机密与业务配置
+.git
+.idea
+.cursor
+.cunzhi-memory
+.credentials
+.secrets
+.DS_Store
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.venv-desktop/
+.venv/
+
+# 运行产物 / 本机数据
+logs/**
+!logs/.gitignore
+replace/**
+!replace/.gitignore
+data/
+deploy/data/
+dist/
+
+# 业务配置：镜像仅保留 demo 模板
+yml/*
+!yml/demo.yml
+*.env
+*.git-credentials
+
+# 打包器源码与体积大的中间物不必进镜像
+script/pack/launcher/payload.tar.gz
+script/pack/launcher/*.exe
+*.md
+!NOTICE
+TEST_GUIDE.md
+USAGE.md
+README.md
