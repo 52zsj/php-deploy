@@ -1,20 +1,26 @@
 # GitShip
 
-从 Git 仓库拉取代码，按环境替换配置，再 rsync 同步到多台服务器。支持 Gitee / GitHub / GitLab 等任意 Git 远端。
+从 Git 仓库拉取代码，或上传本地构建产物，再 rsync 同步到多台服务器。支持 Gitee / GitHub / GitLab 等任意 Git 远端。
 
-**流水线：** 选配置 → Git 拉取 → Replace 覆盖 → 智能 rsync → 同步后命令
+**两种配置类型：**
+
+| 类型 | 流水线 |
+|------|--------|
+| `type: git`（默认） | 选配置 → Git 拉取 → Replace → rsync → 同步后命令 |
+| `type: dir` | 选配置 → 上传到临时工作区 → rsync 覆盖 → 同步后命令 |
 
 ---
 
 ## 特性
 
 - **以 Git 为真相源** — 只操作 Git 跟踪的文件；Git 删除的会同步删除；未入库文件（如插件生成物）不受影响
+- **目录同步** — 本地 HTML/打包产物上传到容器临时目录后直接推送，无需在服务器构建；不删除远端多余文件
 - **智能比对** — `rsync --checksum`，仅上传内容有变的文件
-- **Replace 优先** — `replace/<项目>/<env>/` 覆盖本地检出，优先级高于 Git
+- **Replace 优先** — `replace/<项目>/<env>/` 覆盖本地检出，优先级高于 Git（仅 Git 模式）
 - **多机多组** — 服务器组、按机分支、SSH 密钥或密码认证
 - **同步后命令** — 全局 / 组 / 单机三级 `post_sync`，支持 `chown`、重启服务等
-- **Web 配置界面** — 表单编辑 YAML、上传 Replace、流式执行日志
-- **Docker 友好** — 镜像只含框架，`data/` 外挂配置与密钥
+- **Web 配置界面** — 表单编辑 YAML、上传 Replace / 目录产物、流式执行日志
+- **Docker 友好** — 镜像只含框架，`data/` 外挂配置与密钥；目录同步通过 UI 上传进容器，无需额外挂载源目录
 
 ---
 
@@ -65,17 +71,29 @@ docker compose up -d
 # 浏览器打开 http://127.0.0.1:8765
 ```
 
+**拉不到 `debian:bookworm-slim`（Docker Hub 超时 / `auth.docker.io` i/o timeout）时：**
+
+```bash
+# 1）本机已有旧镜像时，用它当基础镜像，不再访问 Hub
+docker images | head   # 看是否有 gitship:local / php-deploy:local / debian
+GITSHIP_BASE_IMAGE=gitship:local docker compose build
+# 或：GITSHIP_BASE_IMAGE=php-deploy:local docker compose build
+
+# 2）没有本地基础镜像：换网络 / VPN，或配置国内镜像加速后再 build
+# 3）怀疑 IPv6 超时：Docker Desktop → Settings → Docker Engine 加 "ipv6": false 后 Apply & Restart，再重试
+```
+
 宿主机目录与容器映射：
 
 | 宿主机 | 说明 |
 |--------|------|
-| `data/configs/*.yml` | 项目配置 |
+| `data/configs/*.yml` | 项目配置（容器内 `/data/configs`，重建不丢） |
 | `data/secrets/<名>.env` | 密码等密钥 |
 | `data/ssh/` | SSH 私钥（只读挂载） |
 | `data/replace/` | 环境替换文件 |
 | `data/logs/` | 同步日志 |
 
-无配置文件时，容器会自动从 `demo.yml` 种子一份到 `data/configs/`。
+Web UI 保存的配置会直接写到宿主机 `data/configs/`，重建容器不会丢。无配置时自动从镜像种子 `demo.yml` / `demo-dir.yml`。
 
 **命令行同步（CI / 一次性）：**
 
@@ -109,14 +127,12 @@ docker compose exec ui version
 
 ### 1. 创建配置
 
-复制模板（路径二选一，取决于运行方式）：
+配置统一放在 **`data/configs/`**（本地 CLI / Web UI / Docker 共用）：
 
 ```bash
-# 源码 / CLI
-cp yml/demo.yml yml/myproject.yml
-
-# Docker
-cp yml/demo.yml data/configs/myproject.yml
+cp data/configs/demo.yml data/configs/myproject.yml
+# 或目录同步：
+cp data/configs/demo-dir.yml data/configs/mysite.yml
 ```
 
 编辑仓库地址、本地检出目录、服务器与认证信息。密码不要写进 yml，使用：
@@ -137,7 +153,35 @@ GITEE_PASSWORD=你的密码
 2. 填写 / 加载配置，选择部署组
 3. 点击「执行同步」，右侧查看实时日志
 
-### 3. 命令行同步
+### 3. 目录同步（静态站 / 本地打包产物）
+
+适用于已在本地打包好的 HTML、前端 dist 等，**不需要在服务器上构建**。
+
+```bash
+cp data/configs/demo-dir.yml data/configs/mysite.yml
+```
+
+Web UI：
+
+1. 同步类型选 **目录同步**
+2. 「上传文件夹」或「上传压缩包」→ 写入容器内 `./.uploads/<配置名>/`（临时工作区，类似 Git 检出目录）
+3. 配置好服务器组后执行同步 → rsync **覆盖上传**，远端多出的文件**不会删除**
+
+Docker 下无需把宿主机源目录挂进容器；通过 UI 上传即可。重建容器后工作区可能清空，需重新上传。
+
+CLI（本机已有目录时）：
+
+```yaml
+type: dir
+dir:
+  source_dir: "/绝对路径/或/./.uploads/mysite"
+```
+
+```bash
+./sync.sh -y --config=mysite.yml --group=1
+```
+
+### 4. 命令行同步（Git）
 
 ```bash
 # 交互选择配置与服务器组
@@ -161,24 +205,26 @@ GITEE_PASSWORD=你的密码
 sync.sh                 # 主入口（CLI）
 pack.sh                 # 打包快捷入口 → script/pack.sh
 docker-compose.yml
-yml/demo.yml            # 配置模板（唯一入库的 yml）
-replace/<项目>/<env>/   # 环境替换文件
-.secrets/<配置名>.env   # 密钥（gitignore）
-.credentials/           # Git 凭据缓存（gitignore）
-logs/<配置名>/          # 同步日志
+data/configs/demo.yml       # Git 配置模板
+data/configs/demo-dir.yml   # 目录同步模板
+data/configs/*.yml          # 运行时配置（CLI / UI / Docker 共用）
+replace/<项目>/<env>/       # 环境替换文件
+.secrets/<配置名>.env       # 密钥（gitignore）
+.credentials/               # Git 凭据缓存（gitignore）
+logs/<配置名>/              # 同步日志
 script/
-  start-ui.sh           # 启动 Web UI
-  sync-ui/              # Web 界面
-  pack.sh               # 多平台打包
+  start-ui.sh               # 启动 Web UI
+  sync-ui/                  # Web 界面
+  pack.sh                   # 多平台打包
   docker-entrypoint.sh
-data/                   # Docker 外挂数据卷（见上表）
+data/                       # Docker 外挂数据卷（见上表）
 ```
 
 ---
 
 ## 配置说明
 
-最小示例见 `yml/demo.yml`。关键字段：
+最小示例见 `data/configs/demo.yml`。关键字段：
 
 ```yaml
 gitee:                          # 历史键名，兼容任意 Git 托管
@@ -227,7 +273,7 @@ server_groups:
 
 | 变量 | 说明 |
 |------|------|
-| `GITSHIP_BASE_IMAGE` | Docker 构建基础镜像（离线构建） |
+| `GITSHIP_BASE_IMAGE` | 构建用的基础镜像，默认 `debian:bookworm-slim`；Hub 不通时可设为已有本地镜像（如 `gitship:local`） |
 | `GITSHIP_IMAGE` | compose 使用的镜像名 |
 | `DIST` | 输出目录，默认 `dist/` |
 
@@ -235,8 +281,8 @@ server_groups:
 
 ## 安全提示
 
-- 勿将 `.secrets/`、`.credentials/`、真实生产 `yml` 提交到 Git
-- 仓库仅保留 `yml/demo.yml` 与 `data/configs/demo.yml` 模板
+- 勿将 `.secrets/`、`.credentials/`、真实生产配置提交到 Git
+- 仓库仅跟踪 `data/configs/demo.yml`、`demo-dir.yml`；其余配置勿提交真实密钥
 - Replace 目录中的生产密钥勿入库
 - Docker 生产环境建议 `data/ssh` 只读挂载私钥
 

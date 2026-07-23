@@ -53,6 +53,17 @@ const els = {
   replaceFileStatus: $("#replaceFileStatus"),
   tabConfig: $("#tabConfig"),
   tabReplace: $("#tabReplace"),
+  blockGit: $("#blockGit"),
+  blockDir: $("#blockDir"),
+  dirSourceDir: $("#dirSourceDir"),
+  dirStatusText: $("#dirStatusText"),
+  dirUploadDirBtn: $("#dirUploadDirBtn"),
+  dirUploadArchiveBtn: $("#dirUploadArchiveBtn"),
+  dirRefreshBtn: $("#dirRefreshBtn"),
+  dirClearBtn: $("#dirClearBtn"),
+  dirUploadDir: $("#dirUploadDir"),
+  dirUploadArchive: $("#dirUploadArchive"),
+  replaceDirField: $("#replaceDir")?.closest(".field"),
 };
 
 /** 当前 env 下的扁平文件列表缓存，供树勾选展开 */
@@ -75,6 +86,66 @@ function defaultReplaceDir(name) {
 function defaultLocalDir(name) {
   const n = (name || configBaseName()).trim();
   return n ? `/tmp/${n}` : "";
+}
+
+function defaultUploadDir(name) {
+  const n = (name || configBaseName()).trim();
+  return n ? `./.uploads/${n}` : "./.uploads/project";
+}
+
+function getSyncType() {
+  return $('input[name="syncType"]:checked')?.value || "git";
+}
+
+function setSyncTypeUI(type) {
+  const isDir = type === "dir";
+  const radio = $(`input[name="syncType"][value="${isDir ? "dir" : "git"}"]`);
+  if (radio) radio.checked = true;
+  els.blockGit?.classList.toggle("hidden", isDir);
+  els.blockDir?.classList.toggle("hidden", !isDir);
+  els.replaceDirField?.classList.toggle("hidden", isDir);
+  const replaceTab = $(`.panel-tabs .tab[data-tab="replace"]`);
+  if (replaceTab) replaceTab.classList.toggle("hidden", isDir);
+  if (isDir && els.tabReplace && !els.tabReplace.classList.contains("hidden")) {
+    $(`.panel-tabs .tab[data-tab="config"]`)?.click();
+  }
+  if (isDir) {
+    els.dirSourceDir.value = defaultUploadDir();
+    els.repoUrl.removeAttribute("required");
+    els.localDir.removeAttribute("required");
+    refreshDirStatus();
+  } else {
+    els.repoUrl.setAttribute("required", "required");
+    els.localDir.setAttribute("required", "required");
+  }
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function refreshDirStatus() {
+  const name = configFileName();
+  if (!els.dirStatusText) return;
+  if (!configBaseName()) {
+    els.dirStatusText.textContent = "请先填写配置名";
+    return;
+  }
+  try {
+    const res = await fetch(`/api/dir/status?config=${encodeURIComponent(name)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "状态失败");
+    els.dirSourceDir.value = data.source_dir || defaultUploadDir();
+    if (data.empty) {
+      els.dirStatusText.textContent = `工作区空 · ${data.source_dir}（请上传文件夹或压缩包）`;
+    } else {
+      els.dirStatusText.textContent = `已就绪 · ${data.file_count} 个文件 · ${formatBytes(data.total_bytes || 0)} · ${data.source_dir}`;
+    }
+  } catch (e) {
+    els.dirStatusText.textContent = e.message;
+  }
 }
 
 /** 旧约定 ~/replace/xxx → 项目相对 ./replace/<配置名> */
@@ -112,6 +183,7 @@ function onConfigNameChange() {
   const prevLocal = lastAutoName ? `/tmp/${lastAutoName}` : "";
   const prevReplace = lastAutoName ? `./replace/${lastAutoName}` : "";
   const prevHomeReplace = lastAutoName ? `~/replace/${lastAutoName}` : "";
+  const prevUpload = lastAutoName ? `./.uploads/${lastAutoName}` : "";
   if (!els.localDir.value.trim() || els.localDir.value.trim() === prevLocal) {
     els.localDir.value = defaultLocalDir(name);
   }
@@ -124,8 +196,12 @@ function onConfigNameChange() {
   ) {
     els.replaceDir.value = defaultReplaceDir(name);
   }
+  if (!els.dirSourceDir.value.trim() || els.dirSourceDir.value.trim() === prevUpload) {
+    els.dirSourceDir.value = defaultUploadDir(name);
+  }
   lastAutoName = name;
   syncReplaceContext();
+  if (getSyncType() === "dir") refreshDirStatus();
 }
 
 function setSaveStatus(text, type = "") {
@@ -391,20 +467,7 @@ function addGroup(data) {
 }
 
 function collectForm() {
-  const gitAuth = $('input[name="gitAuth"]:checked')?.value || "ssh";
-  const gitee = {
-    repo_url: els.repoUrl.value.trim(),
-    default_branch: els.defaultBranch.value.trim() || "master",
-    local_dir: els.localDir.value.trim(),
-    auth_type: gitAuth,
-  };
-  if (gitAuth === "ssh") {
-    gitee.ssh_key = els.gitSshKey.value.trim();
-  } else {
-    gitee.username = els.gitUsername.value.trim();
-    gitee.password = els.gitPassword.value.trim();
-  }
-
+  const syncType = getSyncType();
   const server_groups = $$(".group-card", els.groupsContainer).map((card) => {
     const group = {
       name: $(".group-name", card).value.trim(),
@@ -414,10 +477,11 @@ function collectForm() {
           name: $(".server-name", srv).value.trim(),
           host: $(".server-host", srv).value.trim(),
           target_dir: $(".server-target", srv).value.trim(),
-          branch: $(".server-branch", srv).value.trim() || gitee.default_branch,
           auth_type: $('.server-auth-type:checked', srv)?.value || "ssh",
           auth_info: $(".server-auth-info", srv).value.trim(),
         };
+        const branch = $(".server-branch", srv).value.trim();
+        if (branch) server.branch = branch;
         const post = linesToList($(".server-post-sync", srv).value);
         if (post.length) server.post_sync_commands = post;
         return server;
@@ -428,17 +492,37 @@ function collectForm() {
     return group;
   });
 
-  ensureReplaceDirOnSave();
-
   const raw = {
-    gitee,
+    type: syncType,
     sync: {
       rsync_options: els.rsyncOptions.value.trim() || "-az --progress",
       exclude: linesToList(els.excludeList.value),
-      replace_dir: els.replaceDir.value.trim() || defaultReplaceDir(),
     },
     server_groups,
   };
+
+  if (syncType === "dir") {
+    raw.dir = {
+      source_dir: els.dirSourceDir.value.trim() || defaultUploadDir(),
+    };
+  } else {
+    ensureReplaceDirOnSave();
+    const gitAuth = $('input[name="gitAuth"]:checked')?.value || "ssh";
+    const gitee = {
+      repo_url: els.repoUrl.value.trim(),
+      default_branch: els.defaultBranch.value.trim() || "master",
+      local_dir: els.localDir.value.trim(),
+      auth_type: gitAuth,
+    };
+    if (gitAuth === "ssh") {
+      gitee.ssh_key = els.gitSshKey.value.trim();
+    } else {
+      gitee.username = els.gitUsername.value.trim();
+      gitee.password = els.gitPassword.value.trim();
+    }
+    raw.gitee = gitee;
+    raw.sync.replace_dir = els.replaceDir.value.trim() || defaultReplaceDir();
+  }
 
   const defaultPost = linesToList(els.defaultPostSync.value);
   if (defaultPost.length) raw.default_post_sync_commands = defaultPost;
@@ -453,11 +537,14 @@ function fillForm(payload) {
   const raw = payload.raw || payload;
   els.configName.value = payload.config_name || "";
   lastAutoName = configBaseName();
+  const syncType = (raw.type || "git").toLowerCase() === "dir" ? "dir" : "git";
+  setSyncTypeUI(syncType);
+
   els.repoUrl.value = raw.gitee?.repo_url || "";
   els.defaultBranch.value = raw.gitee?.default_branch || "develop";
   els.localDir.value = raw.gitee?.local_dir || defaultLocalDir();
   const auth = raw.gitee?.auth_type || "ssh";
-  $(`input[name="gitAuth"][value="${auth}"]`).checked = true;
+  $(`input[name="gitAuth"][value="${auth}"]`) && ($(`input[name="gitAuth"][value="${auth}"]`).checked = true);
   setGitAuthUI(auth);
   els.gitSshKey.value = raw.gitee?.ssh_key || "~/.ssh/id_rsa";
   els.gitUsername.value = raw.gitee?.username || "";
@@ -467,6 +554,7 @@ function fillForm(payload) {
     gitHint.classList.toggle("hidden", !(auth === "password" && raw.gitee?._password_saved));
   }
 
+  els.dirSourceDir.value = raw.dir?.source_dir || defaultUploadDir();
   els.rsyncOptions.value = raw.sync?.rsync_options || "-az --progress";
   els.excludeList.value = listToLines(raw.sync?.exclude);
   els.replaceDir.value = normalizeReplaceDir(raw.sync?.replace_dir, configBaseName());
@@ -476,6 +564,7 @@ function fillForm(payload) {
   (raw.server_groups || [{}]).forEach((g) => addGroup(g));
   refreshPostSyncPicker();
   syncReplaceContext();
+  if (syncType === "dir") refreshDirStatus();
 }
 
 async function fetchConfigs() {
@@ -502,7 +591,9 @@ async function loadConfig(name) {
 async function saveConfig() {
   const body = collectForm();
   if (!body.config_name) throw new Error("请填写配置文件名");
-  if (!body.raw.gitee.repo_url || !body.raw.gitee.local_dir) {
+  if (body.raw.type === "dir") {
+    if (!body.raw.dir?.source_dir) throw new Error("请填写目录同步工作区路径");
+  } else if (!body.raw.gitee?.repo_url || !body.raw.gitee?.local_dir) {
     throw new Error("请填写仓库 URL 和本地目录");
   }
   if (!body.raw.server_groups.length) throw new Error("至少添加一个服务器组");
@@ -1180,6 +1271,91 @@ function requireReplaceTarget() {
   return { dir, env, prefix: currentReplacePrefix() };
 }
 
+async function uploadDirSelection(fileList) {
+  if (!configBaseName()) {
+    els.dirStatusText.textContent = "请先填写配置名";
+    return;
+  }
+  const all = [...(fileList || [])];
+  const files = all.filter((f) => {
+    const path = relativePathFromUpload(f, true);
+    return path && !hasParentDirSegment(path) && !shouldSkipReplacePath(path);
+  });
+  if (!files.length) {
+    els.dirStatusText.textContent = "未选到可上传文件";
+    return;
+  }
+  els.dirStatusText.textContent = `正在上传 ${files.length} 个文件…`;
+  try {
+    const payload = [];
+    for (const f of files) {
+      const path = relativePathFromUpload(f, true);
+      if (!path) continue;
+      payload.push({ path, content_b64: await fileToBase64(f) });
+    }
+    const res = await fetch("/api/dir/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: configFileName(), files: payload, clear: true }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "上传失败");
+    els.dirSourceDir.value = data.source_dir || defaultUploadDir();
+    els.dirStatusText.textContent = `已上传 ${data.count} 个文件 · ${formatBytes(data.total_bytes || 0)}`;
+  } catch (e) {
+    els.dirStatusText.textContent = e.message;
+  }
+}
+
+async function uploadDirArchive(file) {
+  if (!configBaseName()) {
+    els.dirStatusText.textContent = "请先填写配置名";
+    return;
+  }
+  const name = file.name || "";
+  const lower = name.toLowerCase();
+  if (!(/\.(zip|tar|tgz)$/.test(lower) || lower.endsWith(".tar.gz") || lower.endsWith(".tar.bz2"))) {
+    els.dirStatusText.textContent = "仅支持 .zip / .tar.gz / .tgz / .tar";
+    return;
+  }
+  els.dirStatusText.textContent = `正在解压 ${name}…`;
+  try {
+    const res = await fetch("/api/dir/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        config: configFileName(),
+        filename: name,
+        content_b64: await fileToBase64(file),
+        clear: true,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "解压失败");
+    els.dirSourceDir.value = data.source_dir || defaultUploadDir();
+    els.dirStatusText.textContent = `已解压 ${data.count} 个文件 · ${formatBytes(data.total_bytes || 0)}`;
+  } catch (e) {
+    els.dirStatusText.textContent = e.message;
+  }
+}
+
+async function clearDirWorkdir() {
+  if (!configBaseName()) return;
+  if (!confirm("确定清空工作区？")) return;
+  try {
+    const res = await fetch("/api/dir/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: configFileName() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "清空失败");
+    await refreshDirStatus();
+  } catch (e) {
+    els.dirStatusText.textContent = e.message;
+  }
+}
+
 async function uploadReplaceSelection(fileList, isDir) {
   const target = requireReplaceTarget();
   if (!target) return;
@@ -1302,6 +1478,24 @@ els.replaceUploadArchive.addEventListener("change", async () => {
   const file = els.replaceUploadArchive.files?.[0];
   if (file) await uploadReplaceArchive(file);
   els.replaceUploadArchive.value = "";
+});
+
+$$('input[name="syncType"]').forEach((r) => {
+  r.addEventListener("change", () => setSyncTypeUI(getSyncType()));
+});
+els.dirUploadDirBtn?.addEventListener("click", () => els.dirUploadDir.click());
+els.dirUploadArchiveBtn?.addEventListener("click", () => els.dirUploadArchive.click());
+els.dirRefreshBtn?.addEventListener("click", () => refreshDirStatus());
+els.dirClearBtn?.addEventListener("click", () => clearDirWorkdir());
+els.dirUploadDir?.addEventListener("change", async () => {
+  const list = els.dirUploadDir.files;
+  if (list?.length) await uploadDirSelection(list);
+  els.dirUploadDir.value = "";
+});
+els.dirUploadArchive?.addEventListener("change", async () => {
+  const file = els.dirUploadArchive.files?.[0];
+  if (file) await uploadDirArchive(file);
+  els.dirUploadArchive.value = "";
 });
 
 els.replaceSaveFileBtn.addEventListener("click", async () => {

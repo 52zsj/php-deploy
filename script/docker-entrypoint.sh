@@ -20,23 +20,32 @@ link_dir() {
   ln -sfn "$src" "$dst"
 }
 
-# 宿主机 data/configs/*.yml → /app/yml/
+# 宿主机 data/configs → /app/data/configs（整目录链接）
 sync_configs() {
-  mkdir -p "$DATA_CONFIGS" /app/yml
-  # 保留镜像内 demo.yml（非链接时）
-  if [ -d "$DATA_CONFIGS" ]; then
-    for f in "$DATA_CONFIGS"/*.yml "$DATA_CONFIGS"/*.yaml; do
+  mkdir -p "$DATA_CONFIGS"
+
+  # 升级兼容：旧镜像 /app/yml 普通目录 → 迁到 data
+  if [ -d /app/yml ] && [ ! -L /app/yml ]; then
+    for f in /app/yml/*.yml /app/yml/*.yaml; do
       [ -e "$f" ] || continue
-      ln -sfn "$f" "/app/yml/$(basename "$f")"
+      [ -L "$f" ] && continue
+      base=$(basename "$f")
+      if [ ! -f "$DATA_CONFIGS/$base" ]; then
+        cp -n "$f" "$DATA_CONFIGS/$base" 2>/dev/null || true
+      fi
     done
+    rm -rf /app/yml
   fi
-  # 若用户未放任何配置，把 demo 拷一份到 data 方便改
-  if ! ls "$DATA_CONFIGS"/*.yml "$DATA_CONFIGS"/*.yaml >/dev/null 2>&1; then
-    if [ -f /app/yml/demo.yml ] && [ ! -L /app/yml/demo.yml ]; then
-      cp -n /app/yml/demo.yml "$DATA_CONFIGS/demo.yml" 2>/dev/null || true
-      ln -sfn "$DATA_CONFIGS/demo.yml" /app/yml/demo.yml
+
+  # 种子模板：宿主机没有时从镜像 config.seed 拷贝
+  for demo in demo.yml demo-dir.yml; do
+    if [ ! -f "$DATA_CONFIGS/$demo" ] && [ -f "/app/config.seed/$demo" ]; then
+      cp "/app/config.seed/$demo" "$DATA_CONFIGS/$demo" 2>/dev/null || true
     fi
-  fi
+  done
+
+  mkdir -p /app/data
+  link_dir "$DATA_CONFIGS" /app/data/configs
 }
 
 link_dir "$DATA_SECRETS" /app/.secrets

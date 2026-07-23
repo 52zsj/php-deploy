@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GitShip</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260720b">
+  <link rel="stylesheet" href="/static/style.css?v=20260723a">
 </head>
 <body>
   <div class="app">
@@ -13,7 +13,7 @@
         <span class="brand-icon">⇄</span>
         <div>
           <h1>GitShip</h1>
-          <p>Git 拉取 · 多机同步</p>
+          <p>Git / 目录 · 多机同步</p>
         </div>
       </div>
       <div class="topbar-actions">
@@ -38,15 +38,22 @@
               <div class="field">
                 <label for="configName">配置名</label>
                 <input id="configName" required placeholder="myproject">
-                <p class="field-hint">自动使用 ./replace/配置名 与 /tmp/配置名（可在高级里改）</p>
+                <p class="field-hint">Git 模式用 ./replace/配置名；目录模式上传到 ./.uploads/配置名</p>
+              </div>
+              <div class="field">
+                <label>同步类型</label>
+                <div class="seg-control" id="syncTypeControl">
+                  <label><input type="radio" name="syncType" value="git" checked><span>Git 同步</span></label>
+                  <label><input type="radio" name="syncType" value="dir"><span>目录同步</span></label>
+                </div>
               </div>
             </section>
 
-            <section class="block">
+            <section class="block" id="blockGit">
               <h2>Git 仓库</h2>
               <div class="field">
                 <label for="repoUrl">仓库 URL</label>
-                <input id="repoUrl" required placeholder="https://gitee.com/user/repo.git">
+                <input id="repoUrl" placeholder="https://gitee.com/user/repo.git">
               </div>
               <div class="grid-2">
                 <div class="field">
@@ -55,7 +62,7 @@
                 </div>
                 <div class="field">
                   <label for="localDir">本地目录</label>
-                  <input id="localDir" required placeholder="/tmp/myproject">
+                  <input id="localDir" placeholder="/tmp/myproject">
                 </div>
               </div>
               <div class="field">
@@ -80,6 +87,24 @@
                   <p class="field-hint hidden" id="gitPasswordHint">已保存到 .secrets，界面不回显</p>
                 </div>
               </div>
+            </section>
+
+            <section class="block hidden" id="blockDir">
+              <h2>目录同步</h2>
+              <p class="field-hint">上传本地构建产物到容器临时目录，再 rsync 覆盖到服务器（不删除远端多余文件）。Docker 下无需挂载宿主机路径。</p>
+              <div class="field">
+                <label for="dirSourceDir">工作区路径</label>
+                <input id="dirSourceDir" readonly placeholder="./.uploads/myproject">
+              </div>
+              <div class="replace-toolbar">
+                <button type="button" class="btn secondary sm" id="dirUploadDirBtn">上传文件夹</button>
+                <button type="button" class="btn secondary sm" id="dirUploadArchiveBtn">上传压缩包</button>
+                <button type="button" class="btn ghost sm" id="dirRefreshBtn">刷新状态</button>
+                <button type="button" class="btn danger sm" id="dirClearBtn">清空工作区</button>
+                <input type="file" id="dirUploadDir" class="hidden" webkitdirectory directory multiple>
+                <input type="file" id="dirUploadArchive" class="hidden" accept=".zip,.tar,.tar.gz,.tgz,.tar.bz2">
+              </div>
+              <p class="field-hint" id="dirStatusText">尚未上传</p>
             </section>
 
             <section class="block">
@@ -281,6 +306,6 @@
     </div>
   </template>
 
-  <script src="/static/app.js?v=20260720i"></script>
+  <script src="/static/app.js?v=20260723a"></script>
 </body>
 </html>

@@ -28,27 +28,32 @@ _由 vibecoding-init-rules skill 自动生成 / 更新。_
 ## 底层架构
 - 入口：`./sync.sh`（交互式选择 `*.yml` 配置与服务器组）
 - Web 界面：`./script/start-ui.sh`（本地 http://127.0.0.1:8765）；Docker：`docker compose up -d`（镜像 `gitship` + `data/` 外挂）
-  - 数据卷：`data/configs|secrets|credentials|replace|logs|ssh` → 容器 `/data/*`，entrypoint 链到 `/app/yml` 等
+  - 数据卷：`data/configs|secrets|credentials|replace|logs|ssh` → 容器 `/data/*`，entrypoint 链到 `/app/data/configs` 等
+  - 镜像种子：`config.seed/`（由 `data/configs/demo*.yml` 打入）；宿主机无模板时再拷贝
   - `docker compose run --rm sync sync -y --config=…`；`docker compose exec ui version`
   - 打包：`./script/pack.sh [linux|macos|windows|docker|all]` → `dist/`
+- 配置类型：`type: git`（默认）| `type: dir`（目录同步）
 - 分层：单文件 Bash 流水线（CLI 主路径；Web 仅为配置/执行壳）
-  - 配置选择 → YAML 解析 → Git 拉取 → Replace 替换 → rsync 智能同步 → 同步后命令 → 凭据清理
+  - **git**：配置选择 → YAML 解析 → Git 拉取 → Replace 替换 → rsync 智能同步 → 同步后命令 → 凭据清理
+  - **dir**：配置选择 → 校验 `.uploads/<名>/` 工作区 → 整目录 rsync 覆盖（无 `--delete`）→ 同步后命令
 - 关键技术模块（均在 `sync.sh`）：
-  - `select_config_file` / `parse_config` / `select_server_group`：交互与配置
+  - `select_config_file` / `parse_config` / `parse_config_git` / `parse_config_dir` / `select_server_group`
   - `setup_git_credentials` / `pull_code`：Git 拉取与变更检测（A/M/D）
-  - `replace_configs`：按 `replace_dir/<env>/` 覆盖本地检出（优先级最高）
+  - `replace_configs`：按 `replace_dir/<env>/` 覆盖本地检出（优先级最高；仅 git）
   - `sync_to_servers`：rsync `--checksum`，只操作 Git 管理的文件
+  - `sync_dir_to_servers`：整目录 rsync 覆盖，不删远端多余文件
   - `execute_post_sync_commands`：多层级 post_sync（服务器 > 组 > 全局）
   - 日志：`log_*` + 按配置名归档到 `logs/`
-- 数据流：`yml/*.yml` → 本地 `gitee.local_dir` 检出 → `replace/<project>/<env>/` 覆盖 → SSH/rsync 到 `server.target_dir` → 远程 post 命令
-- 跨端约定：无前后端；目标机多为站点目录，本工具本身是 Shell
+- 数据流：
+  - git：`data/configs/*.yml` → 本地 `gitee.local_dir` 检出 → `replace/<project>/<env>/` 覆盖 → SSH/rsync 到 `server.target_dir`
+  - dir：UI 上传 → `.uploads/<配置名>/` → rsync 到 `server.target_dir`
 - 框架约定目录：
-  - 项目配置：`yml/*.yml`（`yml/demo.yml` 为模板；勿与根目录 docker-compose.yml 混放）
-  - 环境替换：`replace/<项目名>/<env>/`（相对路径镜像仓库结构）
-  - Git 凭据缓存：`.credentials/`（已 gitignore，勿提交）
-  - 密码外置：`.secrets/<配置名>.env`（已 gitignore；yml 用 `secret:KEY` / `env:VAR`）
+  - 项目配置：`data/configs/*.yml`（本地 CLI / UI / Docker 共用；仓库仅跟踪 `demo.yml` / `demo-dir.yml`）
+  - 目录同步工作区：`.uploads/<配置名>/`（gitignore；容器内临时，类似 Git local_dir）
+  - 环境替换：`replace/<项目名>/<env>/`
+  - Git 凭据缓存：`.credentials/`；密码外置：`.secrets/<配置名>.env`
   - 日志：`logs/`
-
+  - 已废弃：根目录 `yml/`（旧配置会自动迁到 `data/configs/`）
 ## 路由规则（总览）
 - 无 HTTP 路由；交互入口为 CLI 编号选择配置文件与服务器组。
 - 命令行开关：`-v/--verbose`、`-f/--force`、`-q/--quiet`、`--log=/path`、`-h/--help`。

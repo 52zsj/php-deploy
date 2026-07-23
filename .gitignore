@@ -15,7 +15,10 @@ data/**
 !data/**/
 !data/**/.gitkeep
 !data/configs/demo.yml
+!data/configs/demo-dir.yml
 
-# 项目配置：仅提交 demo 模板，其余为本地/生产配置不入库
-yml/*
-!yml/demo.yml
+# 目录同步临时工作区（类似 Git local_dir）
+.uploads/
+
+# 旧 yml/ 目录已废弃（配置统一 data/configs/）
+yml/

@@ -35,8 +35,13 @@ stage_framework() {
   cp -R sync.sh LICENSE NOTICE VERSION "$dest/"
   # 每次打包写入唯一 stamp，同版本号重打包也会触发安装目录覆盖
   date +%Y%m%d%H%M%S > "$dest/.payload-id"
-  mkdir -p "$dest/yml"
-  cp -R yml/demo.yml "$dest/yml/"
+  mkdir -p "$dest/config.seed" "$dest/data/configs"
+  for demo in demo.yml demo-dir.yml; do
+    if [ -f "data/configs/$demo" ]; then
+      cp "data/configs/$demo" "$dest/data/configs/"
+      cp "data/configs/$demo" "$dest/config.seed/"
+    fi
+  done
   cp -R script/start-ui.sh script/migrate-secrets.sh script/docker-entrypoint.sh "$dest/script/"
   cp -R script/sync-ui "$dest/script/"
   find "$dest/script/sync-ui" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
@@ -297,11 +302,12 @@ services:
 EOF
 
   cp LICENSE NOTICE VERSION "$stage/${out_base}/"
-  mkdir -p "$stage/${out_base}/yml"
-  [ -f yml/demo.yml ] && cp yml/demo.yml "$stage/${out_base}/yml/"
   for d in configs secrets credentials replace logs ssh; do
     mkdir -p "$stage/${out_base}/data/$d"
     touch "$stage/${out_base}/data/$d/.gitkeep"
+  done
+  for demo in demo.yml demo-dir.yml; do
+    [ -f "data/configs/$demo" ] && cp "data/configs/$demo" "$stage/${out_base}/data/configs/"
   done
   write_docker_readme "$stage/${out_base}" "$img_tar"
   cat > "$stage/${out_base}/load-and-up.sh" <<EOF

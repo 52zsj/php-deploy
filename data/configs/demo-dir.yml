@@ -1,0 +1,24 @@
+# GitShip 目录同步模板（本地打包产物 → 上传工作区 → rsync 覆盖）
+type: dir
+
+dir:
+  source_dir: "./.uploads/demo"
+
+sync:
+  rsync_options: "-az --progress"
+  exclude:
+    - "*.map"
+    - ".DS_Store"
+
+default_post_sync_commands:
+  - "chown -R www:www {target_dir}"
+
+server_groups:
+  - name: "生产环境"
+    env: "product"
+    servers:
+      - name: "web1"
+        host: "user@example.com"
+        target_dir: "/www/wwwroot/demo-static"
+        auth_type: "ssh"
+        auth_info: "~/.ssh/id_rsa"

@@ -1,6 +1,6 @@
 ---
 description: Shell / YAML 同步工具编码约定
-globs: "*.sh,yml/*.yml,script/**"
+globs: "*.sh,data/configs/*.yml,script/**"
 alwaysApply: false
 ---
 
@@ -30,7 +30,8 @@ alwaysApply: false
   - 入口命令：`ui`（默认）/ `sync` / `version` / `migrate-secrets` / `bash`
   - 离线构建可 `GITSHIP_BASE_IMAGE=php-deploy:local docker compose build`
   - 离线构建可 `GITSHIP_BASE_IMAGE=php-deploy:local docker compose build`
-- `yml/demo.yml`：配置模板（入库）；其余 `yml/*.yml` 与 `data/configs/*.yml` 为本地配置（gitignore）
+- `data/configs/demo.yml` / `demo-dir.yml`：仓库模板兼运行时配置目录（与 Docker 共用）
+- `.uploads/<配置名>/`：目录同步临时工作区（UI 上传目标；gitignore）
 - `replace/<项目>/<env>/...`：环境配置覆盖源，路径相对仓库根
 - `script/`：新增维护 / cron / 一次性 CLI（主入口仍为根目录 `sync.sh`）
 

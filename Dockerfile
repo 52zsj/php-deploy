@@ -47,7 +47,7 @@ RUN set -eux; \
 WORKDIR /app
 
 COPY sync.sh LICENSE NOTICE VERSION ./
-COPY yml/demo.yml ./yml/demo.yml
+COPY data/configs/demo.yml data/configs/demo-dir.yml ./config.seed/
 COPY script/docker-entrypoint.sh script/start-ui.sh script/migrate-secrets.sh ./script/
 COPY script/sync-ui/ ./script/sync-ui/
 COPY replace/.gitignore ./replace/.gitignore
@@ -57,7 +57,8 @@ RUN chmod +x sync.sh script/*.sh \
     && find script/sync-ui -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true \
     && find script/sync-ui -name '*.pyc' -delete 2>/dev/null || true \
     && mkdir -p \
-         logs .secrets .credentials replace yml \
+         logs .secrets .credentials replace .uploads config.seed \
+         data/configs \
          /data/configs /data/secrets /data/credentials \
          /data/replace /data/logs /data/ssh \
     && git config --global --add safe.directory '*' \

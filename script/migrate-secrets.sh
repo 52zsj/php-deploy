@@ -1,12 +1,26 @@
 #!/bin/bash
-# 将 yml/*.yml 中的明文密码迁移到 .secrets/<配置名>.env，yml 改为 secret: 引用
+# 将 data/configs/*.yml（兼容旧 yml/）中的明文密码迁移到 .secrets/<配置名>.env
 # 兼容 macOS bash 3.2（不用关联数组）
 
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$(pwd)"
-CONFIG_DIR="$ROOT/yml"
+if [ -n "${DATA_CONFIGS:-}" ]; then
+  CONFIG_DIR="$DATA_CONFIGS"
+else
+  CONFIG_DIR="$ROOT/data/configs"
+fi
 SECRETS_DIR="$ROOT/.secrets"
 mkdir -p "$SECRETS_DIR" "$CONFIG_DIR"
+
+# 旧 yml/ 迁移
+if [ -d "$ROOT/yml" ]; then
+  for f in "$ROOT/yml"/*.yml; do
+    [ -f "$f" ] || continue
+    [ -L "$f" ] && continue
+    base=$(basename "$f")
+    [ -f "$CONFIG_DIR/$base" ] || cp "$f" "$CONFIG_DIR/$base"
+  done
+fi
 
 if ! command -v yq >/dev/null 2>&1; then
   echo "需要 yq: brew install yq"

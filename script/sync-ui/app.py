@@ -27,9 +27,36 @@ from urllib.parse import parse_qs, urlparse
 
 UI_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = UI_DIR.parent.parent
-CONFIG_DIR = PROJECT_ROOT / "yml"
+# Docker：DATA_CONFIGS=/data/configs；本机默认 data/configs（与 Docker 共用）
+_CONFIG_ENV = (os.environ.get("DATA_CONFIGS") or os.environ.get("GITSHIP_CONFIG_DIR") or "").strip()
+CONFIG_DIR = Path(_CONFIG_ENV).expanduser() if _CONFIG_ENV else (PROJECT_ROOT / "data" / "configs")
 STATIC_DIR = UI_DIR / "static"
 DEFAULT_PORT = 8765
+
+
+def ensure_config_seed() -> None:
+    """缺 demo 时从 config.seed/ 拷贝；兼容旧 yml/ 迁移到 data/configs。"""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    for name in ("demo.yml", "demo-dir.yml"):
+        dest = CONFIG_DIR / name
+        if dest.is_file():
+            continue
+        for src_dir in (PROJECT_ROOT / "config.seed", PROJECT_ROOT / "yml.seed"):
+            src = src_dir / name
+            if src.is_file():
+                dest.write_bytes(src.read_bytes())
+                break
+    legacy = PROJECT_ROOT / "yml"
+    if legacy.is_dir() and legacy.resolve() != CONFIG_DIR.resolve():
+        for src in list(legacy.glob("*.yml")) + list(legacy.glob("*.yaml")):
+            if src.is_symlink():
+                continue
+            dest = CONFIG_DIR / src.name
+            if not dest.exists():
+                dest.write_bytes(src.read_bytes())
+
+
+ensure_config_seed()
 # CSI / OSC / 其他终端控制序列
 CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
@@ -278,6 +305,11 @@ def write_replace_bytes(replace_dir: str, env: str, rel_path: str, data: bytes) 
 MAX_UPLOAD_FILES = 200
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 单文件 2MB
 MAX_ARCHIVE_BYTES = 20 * 1024 * 1024  # 压缩包 20MB
+# 目录同步工作区：静态站可能更大
+MAX_DIR_UPLOAD_FILES = 5000
+MAX_DIR_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_DIR_ARCHIVE_BYTES = 200 * 1024 * 1024
+UPLOADS_DIRNAME = ".uploads"
 ARCHIVE_SKIP_NAMES = {"__macosx", ".ds_store", "thumbs.db"}
 
 
@@ -638,6 +670,143 @@ def ensure_replace_env(replace_dir: str, env: str) -> dict:
     return {"ok": True, "env": env, "path": str(env_dir)}
 
 
+def _uploads_root() -> Path:
+    root = PROJECT_ROOT / UPLOADS_DIRNAME
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def resolve_upload_workdir(config_name: str) -> Path:
+    """配置名 → .uploads/<stem>/（容器内临时工作区）。"""
+    stem = Path(config_name or "").name
+    if stem.endswith(".yml"):
+        stem = stem[:-4]
+    stem = stem.strip()
+    if not stem or ".." in stem or "/" in stem or "\\" in stem:
+        raise ValueError("无效的配置名")
+    dest = _uploads_root() / stem
+    dest.mkdir(parents=True, exist_ok=True)
+    # 确保仍在 .uploads 内
+    dest.resolve().relative_to(_uploads_root().resolve())
+    return dest
+
+
+def dir_upload_status(config_name: str) -> dict:
+    dest = resolve_upload_workdir(config_name)
+    files = [p for p in dest.rglob("*") if p.is_file()]
+    total = sum(p.stat().st_size for p in files)
+    rel = f"./{UPLOADS_DIRNAME}/{dest.name}"
+    return {
+        "ok": True,
+        "source_dir": rel,
+        "abs_path": str(dest),
+        "file_count": len(files),
+        "total_bytes": total,
+        "empty": len(files) == 0,
+    }
+
+
+def clear_dir_workdir(config_name: str) -> Path:
+    dest = resolve_upload_workdir(config_name)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def _should_skip_dir_upload_path(rel: str) -> bool:
+    parts = [p for p in rel.replace("\\", "/").split("/") if p]
+    if not parts:
+        return True
+    junk = {"__macosx", ".ds_store", "thumbs.db"}
+    for i, part in enumerate(parts):
+        if part.lower() in junk:
+            return True
+        if i < len(parts) - 1 and part.startswith("."):
+            return True
+    return False
+
+
+def upload_dir_files(config_name: str, files: list, clear: bool = True) -> dict:
+    """上传文件列表到 .uploads/<config>/；默认先清空再写入。"""
+    if not isinstance(files, list) or not files:
+        raise ValueError("没有可上传的文件")
+    if len(files) > MAX_DIR_UPLOAD_FILES:
+        raise ValueError(f"一次最多上传 {MAX_DIR_UPLOAD_FILES} 个文件")
+
+    dest = clear_dir_workdir(config_name) if clear else resolve_upload_workdir(config_name)
+    saved = []
+    for item in files:
+        if not isinstance(item, dict):
+            raise ValueError("文件项格式错误")
+        rel = (item.get("path") or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            raise ValueError(f"非法路径: {rel}")
+        if _should_skip_dir_upload_path(rel):
+            continue
+        raw_b64 = item.get("content_b64")
+        if raw_b64 is None:
+            raise ValueError(f"缺少内容: {rel}")
+        try:
+            data = base64.b64decode(raw_b64)
+        except Exception as exc:
+            raise ValueError(f"解码失败: {rel}") from exc
+        if len(data) > MAX_DIR_UPLOAD_BYTES:
+            raise ValueError(f"文件过大（>{MAX_DIR_UPLOAD_BYTES}B）: {rel}")
+        out = safe_join(dest, rel)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        saved.append(rel)
+
+    if not saved:
+        raise ValueError("没有写入任何文件（可能被过滤）")
+    status = dir_upload_status(config_name)
+    status["saved"] = saved
+    status["count"] = len(saved)
+    return status
+
+
+def extract_dir_archive(config_name: str, filename: str, content_b64: str, clear: bool = True) -> dict:
+    """解压压缩包到 .uploads/<config>/。"""
+    kind = _archive_kind(filename)
+    try:
+        raw = base64.b64decode(content_b64 or "")
+    except Exception as exc:
+        raise ValueError("压缩包解码失败") from exc
+    if not raw:
+        raise ValueError("压缩包为空")
+    if len(raw) > MAX_DIR_ARCHIVE_BYTES:
+        raise ValueError(f"压缩包过大（>{MAX_DIR_ARCHIVE_BYTES}B）")
+
+    members = list(_iter_zip_members(raw) if kind == "zip" else _iter_tar_members(raw))
+    if not members:
+        raise ValueError("压缩包内没有可导入的文件")
+    if len(members) > MAX_DIR_UPLOAD_FILES:
+        raise ValueError(f"压缩包内文件过多（最多 {MAX_DIR_UPLOAD_FILES}）")
+
+    dest = clear_dir_workdir(config_name) if clear else resolve_upload_workdir(config_name)
+    saved = []
+    for rel_raw, data in members:
+        rel_raw = rel_raw.lstrip("/")
+        if not rel_raw or ".." in Path(rel_raw).parts:
+            raise ValueError(f"非法压缩包路径: {rel_raw}")
+        if _should_skip_dir_upload_path(rel_raw) or _should_skip_archive_member(rel_raw):
+            continue
+        if len(data) > MAX_DIR_UPLOAD_BYTES:
+            raise ValueError(f"文件过大（>{MAX_DIR_UPLOAD_BYTES}B）: {rel_raw}")
+        out = safe_join(dest, rel_raw)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        saved.append(rel_raw)
+
+    if not saved:
+        raise ValueError("压缩包内没有可写入的文件")
+    status = dir_upload_status(config_name)
+    status["saved"] = saved
+    status["count"] = len(saved)
+    return status
+
+
 def load_config(name: str) -> dict:
     safe = Path(name).name
     path = CONFIG_DIR / safe
@@ -649,18 +818,22 @@ def load_config(name: str) -> dict:
 
     # 界面永不回填真实密码：只告知是否已有密钥
     display = json.loads(json.dumps(data))  # deep copy
-    gitee = display.setdefault("gitee", {})
-    if gitee.get("auth_type") == "password":
+    gitee = display.get("gitee")
+    if isinstance(gitee, dict) and gitee.get("auth_type") == "password":
         raw_pw = gitee.get("password") or ""
         has = bool(is_secret_ref(raw_pw) or (raw_pw and not is_secret_ref(raw_pw)) or secrets.get("GITEE_PASSWORD"))
         gitee["password"] = ""
         gitee["_password_saved"] = has
     for group in display.get("server_groups") or []:
+        if not isinstance(group, dict):
+            continue
         for server in group.get("servers") or []:
+            if not isinstance(server, dict):
+                continue
             if server.get("auth_type") == "password":
                 raw = server.get("auth_info") or ""
-                name = server.get("name") or ""
-                key = f"SERVER_{sanitize_key(name)}" if name else ""
+                srv_name = server.get("name") or ""
+                key = f"SERVER_{sanitize_key(srv_name)}" if srv_name else ""
                 has = bool(
                     is_secret_ref(raw)
                     or (raw and not is_secret_ref(raw) and not str(raw).startswith("~") and not str(raw).startswith("/"))
@@ -677,31 +850,60 @@ def load_config(name: str) -> dict:
 
 def externalize_secrets(stem: str, payload: dict, previous: dict | None = None) -> dict:
     """把明文密码写入 .secrets，yml 中改为 secret: 引用。空密码且已有引用则保留。"""
+    if not isinstance(payload, dict):
+        raise ValueError("配置内容无效")
     secrets = read_secrets_file(secrets_path(stem))
-    prev = previous or {}
+    prev = previous if isinstance(previous, dict) else {}
 
-    gitee = payload.setdefault("gitee", {})
-    if gitee.get("auth_type") == "password":
-        key = "GITEE_PASSWORD"
-        pw = (gitee.get("password") or "").strip()
-        prev_ref = ""
-        prev_gitee = (prev.get("gitee") or {})
-        if prev_gitee.get("auth_type") == "password":
-            prev_ref = prev_gitee.get("password") or ""
-        if pw:
-            secrets[key] = pw
-            gitee["password"] = f"secret:{key}"
-        elif is_secret_ref(prev_ref):
-            gitee["password"] = prev_ref
-        elif secrets.get(key):
-            gitee["password"] = f"secret:{key}"
-        else:
-            gitee["password"] = ""
+    cfg_type = str(payload.get("type") or "git").strip().lower()
+    is_dir = cfg_type in ("dir", "directory")
+    payload["type"] = "dir" if is_dir else "git"
+
+    if is_dir:
+        # 目录模式不写 gitee / replace_dir
+        payload.pop("gitee", None)
+        sync = payload.get("sync")
+        if isinstance(sync, dict):
+            sync.pop("replace_dir", None)
+        dir_block = payload.get("dir")
+        if not isinstance(dir_block, dict):
+            dir_block = {}
+            payload["dir"] = dir_block
+        if not str(dir_block.get("source_dir") or "").strip():
+            raise ValueError("目录同步需填写 dir.source_dir")
     else:
-        gitee.pop("password", None)
+        gitee = payload.get("gitee")
+        if not isinstance(gitee, dict):
+            raise ValueError("Git 同步需填写 gitee 配置")
+        if gitee.get("auth_type") == "password":
+            key = "GITEE_PASSWORD"
+            pw = (gitee.get("password") or "").strip()
+            prev_ref = ""
+            prev_gitee = prev.get("gitee") if isinstance(prev.get("gitee"), dict) else {}
+            if prev_gitee.get("auth_type") == "password":
+                prev_ref = prev_gitee.get("password") or ""
+            if pw:
+                secrets[key] = pw
+                gitee["password"] = f"secret:{key}"
+            elif is_secret_ref(prev_ref):
+                gitee["password"] = prev_ref
+            elif secrets.get(key):
+                gitee["password"] = f"secret:{key}"
+            else:
+                gitee["password"] = ""
+        else:
+            gitee.pop("password", None)
+        gitee.pop("_password_ref", None)
+        gitee.pop("_password_saved", None)
 
     for gi, group in enumerate(payload.get("server_groups") or []):
+        if not isinstance(group, dict):
+            continue
         for si, server in enumerate(group.get("servers") or []):
+            if not isinstance(server, dict):
+                continue
+            server.pop("_auth_info_ref", None)
+            server.pop("_auth_info_saved", None)
             if server.get("auth_type") != "password":
                 continue
             name = server.get("name") or f"server_{gi}_{si}"
@@ -709,7 +911,9 @@ def externalize_secrets(stem: str, payload: dict, previous: dict | None = None) 
             val = (server.get("auth_info") or "").strip()
             prev_ref = ""
             try:
-                prev_ref = (((prev.get("server_groups") or [])[gi].get("servers") or [])[si].get("auth_info") or "")
+                prev_server = (((prev.get("server_groups") or [])[gi].get("servers") or [])[si])
+                if isinstance(prev_server, dict):
+                    prev_ref = prev_server.get("auth_info") or ""
             except (IndexError, AttributeError, TypeError):
                 prev_ref = ""
             if val:
@@ -721,14 +925,6 @@ def externalize_secrets(stem: str, payload: dict, previous: dict | None = None) 
                 server["auth_info"] = f"secret:{key}"
             else:
                 server["auth_info"] = ""
-
-    # 清掉前端辅助字段
-    gitee.pop("_password_ref", None)
-    gitee.pop("_password_saved", None)
-    for group in payload.get("server_groups") or []:
-        for server in group.get("servers") or []:
-            server.pop("_auth_info_ref", None)
-            server.pop("_auth_info_saved", None)
 
     write_secrets_file(secrets_path(stem), secrets)
     return payload
@@ -742,10 +938,14 @@ def save_config(name: str, data: dict) -> str:
         raise ValueError("invalid config name")
 
     payload = data.get("raw") or data
+    if not isinstance(payload, dict):
+        raise ValueError("配置内容无效")
     stem = Path(safe_name).stem
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     path = CONFIG_DIR / safe_name
     previous = yaml_load(path) if path.is_file() else {}
+    if not isinstance(previous, dict):
+        previous = {}
     payload = externalize_secrets(stem, payload, previous)
     yaml_dump(path, payload)
     return safe_name
@@ -964,6 +1164,15 @@ class SyncUIHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "config not found"})
             return
+        if path == "/api/dir/status":
+            qs = parse_qs(parsed.query)
+            name = (qs.get("config") or qs.get("config_name") or [""])[0]
+            try:
+                self._send_json(HTTPStatus.OK, dir_upload_status(name))
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
         if path == "/api/replace/envs":
             qs = parse_qs(parsed.query)
             replace_dir = (qs.get("replace_dir") or [""])[0]
@@ -1088,6 +1297,54 @@ class SyncUIHandler(BaseHTTPRequestHandler):
                         body.get("project_name") or "",
                     ),
                 )
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        if path == "/api/dir/status":
+            try:
+                body = self._read_json()
+                self._send_json(HTTPStatus.OK, dir_upload_status(body.get("config") or body.get("config_name") or ""))
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        if path == "/api/dir/upload":
+            try:
+                body = self._read_json()
+                self._send_json(
+                    HTTPStatus.OK,
+                    upload_dir_files(
+                        body.get("config") or body.get("config_name") or "",
+                        body.get("files") or [],
+                        clear=body.get("clear", True),
+                    ),
+                )
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        if path == "/api/dir/archive":
+            try:
+                body = self._read_json()
+                self._send_json(
+                    HTTPStatus.OK,
+                    extract_dir_archive(
+                        body.get("config") or body.get("config_name") or "",
+                        body.get("filename") or "",
+                        body.get("content_b64") or "",
+                        clear=body.get("clear", True),
+                    ),
+                )
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        if path == "/api/dir/clear":
+            try:
+                body = self._read_json()
+                clear_dir_workdir(body.get("config") or body.get("config_name") or "")
+                self._send_json(HTTPStatus.OK, dir_upload_status(body.get("config") or body.get("config_name") or ""))
             except Exception as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return

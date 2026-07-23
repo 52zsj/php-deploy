@@ -613,27 +613,72 @@ check_dependencies() {
     echo ""
 }
 
-# 列出并选择配置文件（统一放在 yml/ 目录，避免与 docker-compose.yml 等混淆）
+# 配置目录：与 Docker 共用 data/configs
+resolve_config_dir() {
+    if [ -n "${DATA_CONFIGS:-}" ]; then
+        echo "$DATA_CONFIGS"
+        return
+    fi
+    if [ -n "${GITSHIP_CONFIG_DIR:-}" ]; then
+        echo "$GITSHIP_CONFIG_DIR"
+        return
+    fi
+    echo "$SCRIPT_DIR/data/configs"
+}
+
+# 缺模板时从镜像/发行包内的 config.seed 拷贝；兼容旧 yml/ 迁移
+ensure_config_dir() {
+    local dir="$1"
+    mkdir -p "$dir"
+
+    local demo
+    for demo in demo.yml demo-dir.yml; do
+        if [ ! -f "$dir/$demo" ]; then
+            if [ -f "$SCRIPT_DIR/config.seed/$demo" ]; then
+                cp "$SCRIPT_DIR/config.seed/$demo" "$dir/$demo" 2>/dev/null || true
+            elif [ -f "$SCRIPT_DIR/yml.seed/$demo" ]; then
+                cp "$SCRIPT_DIR/yml.seed/$demo" "$dir/$demo" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # 旧路径兼容：yml/*.yml → data/configs（不覆盖）
+    if [ -d "$SCRIPT_DIR/yml" ]; then
+        local f base
+        for f in "$SCRIPT_DIR/yml"/*.yml "$SCRIPT_DIR/yml"/*.yaml; do
+            [ -e "$f" ] || continue
+            [ -L "$f" ] && continue
+            base=$(basename "$f")
+            if [ ! -f "$dir/$base" ]; then
+                cp "$f" "$dir/$base" 2>/dev/null || true
+            fi
+        done
+    fi
+}
+
+# 列出并选择配置文件（统一 data/configs，与 Docker 共用）
 select_config_file() {
-    CONFIG_DIR="$SCRIPT_DIR/yml"
-    mkdir -p "$CONFIG_DIR"
+    CONFIG_DIR="$(resolve_config_dir)"
+    ensure_config_dir "$CONFIG_DIR"
 
     if [ -n "$PRESET_CONFIG" ]; then
         echo -e "${BLUE}[→]${NC} 使用指定配置文件..."
         if [[ "$PRESET_CONFIG" == /* ]]; then
             CONFIG_FILE="$PRESET_CONFIG"
-        elif [[ "$PRESET_CONFIG" == yml/* ]] || [[ "$PRESET_CONFIG" == ./yml/* ]]; then
+        elif [[ "$PRESET_CONFIG" == data/configs/* ]] || [[ "$PRESET_CONFIG" == ./data/configs/* ]]; then
             CONFIG_FILE="$SCRIPT_DIR/${PRESET_CONFIG#./}"
+        elif [[ "$PRESET_CONFIG" == yml/* ]] || [[ "$PRESET_CONFIG" == ./yml/* ]]; then
+            # 旧路径：--config=yml/foo.yml → data/configs/foo.yml
+            CONFIG_FILE="$CONFIG_DIR/${PRESET_CONFIG##*/}"
         elif [ -f "$CONFIG_DIR/$PRESET_CONFIG" ]; then
             CONFIG_FILE="$CONFIG_DIR/$PRESET_CONFIG"
         elif [ -f "$SCRIPT_DIR/$PRESET_CONFIG" ]; then
-            # 兼容旧路径（根目录）
             CONFIG_FILE="$SCRIPT_DIR/$PRESET_CONFIG"
         else
             CONFIG_FILE="$CONFIG_DIR/$PRESET_CONFIG"
         fi
         if [ ! -f "$CONFIG_FILE" ]; then
-            log_error "配置文件 $CONFIG_FILE 不存在（请放在 yml/ 目录）"
+            log_error "配置文件 $CONFIG_FILE 不存在（请放在 data/configs/）"
             exit 1
         fi
         CONFIG_FILE_BASE=$(basename "$CONFIG_FILE" .yml)
@@ -644,7 +689,7 @@ select_config_file() {
         return
     fi
 
-    echo -e "${BLUE}[→]${NC} 查找配置文件 (yml/)..."
+    echo -e "${BLUE}[→]${NC} 查找配置文件 (data/configs/)..."
 
     CONFIG_FILES=()
     for file in "$CONFIG_DIR"/*.yml; do
@@ -692,6 +737,117 @@ parse_config() {
         exit 1
     fi
 
+    CONFIG_TYPE="git"
+    SOURCE_DIR=""
+    if command -v yq >/dev/null 2>&1; then
+        CONFIG_TYPE=$(yq e '.type // "git"' "$CONFIG_FILE")
+    else
+        CONFIG_TYPE=$(python3 -c "
+import yaml,sys
+with open(sys.argv[1]) as f:
+    c=yaml.safe_load(f) or {}
+print(c.get('type') or 'git')
+" "$CONFIG_FILE")
+    fi
+    CONFIG_TYPE=$(echo "$CONFIG_TYPE" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    [ -z "$CONFIG_TYPE" ] || [ "$CONFIG_TYPE" = "null" ] && CONFIG_TYPE="git"
+
+    if [ "$CONFIG_TYPE" = "dir" ] || [ "$CONFIG_TYPE" = "directory" ]; then
+        CONFIG_TYPE="dir"
+        parse_config_dir
+        return
+    fi
+
+    CONFIG_TYPE="git"
+    parse_config_git
+}
+
+# 目录同步配置
+parse_config_dir() {
+    if command -v yq >/dev/null 2>&1; then
+        SOURCE_DIR=$(yq e '.dir.source_dir // ""' "$CONFIG_FILE")
+        RSYNC_OPTIONS=$(yq e '.sync.rsync_options // "-az --progress"' "$CONFIG_FILE")
+        GROUP_COUNT=$(yq e '.server_groups | length' "$CONFIG_FILE")
+        EXCLUDE_PATTERNS=()
+        EXCLUDE_COUNT=$(yq e '.sync.exclude | length' "$CONFIG_FILE")
+        if [ "$EXCLUDE_COUNT" != "null" ] && [ "$EXCLUDE_COUNT" -gt 0 ] 2>/dev/null; then
+            for ((i=0; i<$EXCLUDE_COUNT; i++)); do
+                EXCLUDE_ITEM=$(yq e ".sync.exclude[$i]" "$CONFIG_FILE")
+                [ -n "$EXCLUDE_ITEM" ] && [ "$EXCLUDE_ITEM" != "null" ] && EXCLUDE_PATTERNS+=("$EXCLUDE_ITEM")
+            done
+        fi
+    else
+        CONFIG_PYTHON=$(cat << 'EOF'
+import yaml, sys, json, os
+with open(sys.argv[1], 'r') as file:
+    config = yaml.safe_load(file) or {}
+d = config.get('dir') or {}
+sync = config.get('sync') or {}
+output = {
+    'source_dir': d.get('source_dir') or '',
+    'rsync_options': sync.get('rsync_options') or '-az --progress',
+    'group_count': len(config.get('server_groups') or []),
+    'server_groups': config.get('server_groups') or [],
+    'exclude': sync.get('exclude') or [],
+}
+print(json.dumps(output))
+EOF
+)
+        CONFIG_JSON=$(python3 -c "$CONFIG_PYTHON" "$CONFIG_FILE")
+        SOURCE_DIR=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin).get('source_dir',''))")
+        RSYNC_OPTIONS=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['rsync_options'])")
+        GROUP_COUNT=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['group_count'])")
+        EXCLUDE_PATTERNS=()
+        while IFS= read -r EXCLUDE_ITEM; do
+            [ -n "$EXCLUDE_ITEM" ] && EXCLUDE_PATTERNS+=("$EXCLUDE_ITEM")
+        done < <(echo "$CONFIG_JSON" | python3 -c "import sys, json; [print(i) for i in json.load(sys.stdin).get('exclude', [])]")
+    fi
+
+    EXCLUDE_OPTS=""
+    for EXCLUDE_ITEM in "${EXCLUDE_PATTERNS[@]}"; do
+        EXCLUDE_OPTS="$EXCLUDE_OPTS --exclude=$EXCLUDE_ITEM"
+    done
+
+    if [ -z "$SOURCE_DIR" ] || [ "$SOURCE_DIR" = "null" ]; then
+        log_error "目录同步配置缺少 dir.source_dir"
+        exit 1
+    fi
+    SOURCE_DIR=$(expand_path "$SOURCE_DIR")
+    LOCAL_DIR="$SOURCE_DIR"
+    DEFAULT_BRANCH="master"
+    REPO_URL=""
+    GIT_AUTH_TYPE=""
+
+    if [ ! -d "$SOURCE_DIR" ]; then
+        log_error "源目录不存在: $SOURCE_DIR"
+        log_warn "请先在 Web UI 上传目录/压缩包，或本机准备好该目录"
+        exit 1
+    fi
+
+    if [ -z "$(ls -A "$SOURCE_DIR" 2>/dev/null)" ]; then
+        log_error "源目录为空: $SOURCE_DIR"
+        log_warn "请先上传构建产物后再执行同步"
+        exit 1
+    fi
+
+    if [ -n "$LOG_FILE" ]; then
+        echo "配置详情:" >> "$LOG_FILE"
+        echo "  模式: 目录同步" >> "$LOG_FILE"
+        echo "  源目录: $SOURCE_DIR" >> "$LOG_FILE"
+        echo "" >> "$LOG_FILE"
+    fi
+
+    log_info "同步模式: ${CYAN}目录同步${NC} (覆盖上传，不删除远端多余文件)"
+    log_info "源目录: ${CYAN}$SOURCE_DIR${NC}"
+    if [ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]; then
+        log_info "排除规则: ${CYAN}${#EXCLUDE_PATTERNS[@]}${NC} 条"
+    fi
+    echo -e "  ${GREEN}[✓]${NC} 配置解析完成"
+    echo ""
+}
+
+# Git 同步配置（原 parse_config 主体）
+parse_config_git() {
     if command -v yq >/dev/null 2>&1; then
         # 使用yq解析配置
         REPO_URL=$(yq e '.gitee.repo_url' "$CONFIG_FILE")
@@ -820,6 +976,7 @@ EOF
     # 写入详细信息到日志文件（URL 脱敏，不含密码）
     if [ -n "$LOG_FILE" ]; then
         echo "配置详情:" >> "$LOG_FILE"
+        echo "  模式: Git 同步" >> "$LOG_FILE"
         echo "  仓库URL: $(redact_url "$REPO_URL")" >> "$LOG_FILE"
         echo "  本地目录: $LOCAL_DIR" >> "$LOG_FILE"
         echo "  认证类型: $GIT_AUTH_TYPE" >> "$LOG_FILE"
@@ -1336,6 +1493,159 @@ replace_configs() {
         fi
     fi
     echo ""
+}
+
+# 目录同步：整目录 rsync 覆盖上传（不加 --delete）
+sync_dir_to_servers() {
+    echo -e "${BLUE}[→]${NC} 开始目录同步到服务器..."
+    echo -e "  ${CYAN}源:${NC} $SOURCE_DIR"
+    echo ""
+
+    HAS_PROXY=0
+    if env | grep -i proxy > /dev/null; then
+        echo -e "${YELLOW}[!]${NC} 检测到代理环境变量"
+        HAS_PROXY=1
+        sync_prompt disable_proxy_choice "是否为SSH连接临时禁用代理? (y/n): " "y"
+        if [ "$disable_proxy_choice" = "y" ] || [ "$disable_proxy_choice" = "Y" ]; then
+            export BACKUP_HTTP_PROXY=$http_proxy
+            export BACKUP_HTTPS_PROXY=$https_proxy
+            export BACKUP_ALL_PROXY=$all_proxy
+            export BACKUP_NO_PROXY=$no_proxy
+            unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+            echo -e "  ${GREEN}[✓]${NC} 已临时禁用代理"
+            echo ""
+        fi
+    fi
+
+    local exclude_args=()
+    for EXCLUDE_ITEM in "${EXCLUDE_PATTERNS[@]}"; do
+        exclude_args+=(--exclude="$EXCLUDE_ITEM")
+    done
+    # 内置跳过常见点目录
+    exclude_args+=(--exclude=".git/" --exclude=".svn/" --exclude=".hg/")
+
+    for ((i=0; i<$SERVER_COUNT; i++)); do
+        if command -v yq >/dev/null 2>&1; then
+            SERVER_NAME=$(yq e ".server_groups[$GROUP_INDEX].servers[$i].name" "$CONFIG_FILE")
+            SERVER_HOST=$(yq e ".server_groups[$GROUP_INDEX].servers[$i].host" "$CONFIG_FILE")
+            TARGET_DIR=$(yq e ".server_groups[$GROUP_INDEX].servers[$i].target_dir" "$CONFIG_FILE")
+            AUTH_TYPE=$(yq e ".server_groups[$GROUP_INDEX].servers[$i].auth_type" "$CONFIG_FILE")
+            AUTH_INFO=$(yq e ".server_groups[$GROUP_INDEX].servers[$i].auth_info" "$CONFIG_FILE")
+            if [[ "$AUTH_TYPE" = "ssh" ]]; then
+                AUTH_INFO=$(expand_path "$AUTH_INFO")
+            elif [[ "$AUTH_TYPE" = "password" ]]; then
+                AUTH_INFO=$(resolve_secret "$AUTH_INFO" "servers[$i].auth_info")
+            fi
+        else
+            SERVER_JSON=$(echo "$CONFIG_JSON" | python3 -c "import sys, json; print(json.dumps(json.load(sys.stdin)['server_groups'][$GROUP_INDEX]['servers'][$i]))")
+            SERVER_NAME=$(echo "$SERVER_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['name'])")
+            SERVER_HOST=$(echo "$SERVER_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['host'])")
+            TARGET_DIR=$(echo "$SERVER_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['target_dir'])")
+            AUTH_TYPE=$(echo "$SERVER_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['auth_type'])")
+            AUTH_INFO=$(echo "$SERVER_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['auth_info'])")
+            if [[ "$AUTH_TYPE" = "ssh" ]]; then
+                AUTH_INFO=$(expand_path "$AUTH_INFO")
+            elif [[ "$AUTH_TYPE" = "password" ]]; then
+                AUTH_INFO=$(resolve_secret "$AUTH_INFO" "servers[$i].auth_info")
+            fi
+        fi
+
+        if ! validate_path "$TARGET_DIR" "target"; then
+            log_error "跳过不安全的目标路径: $TARGET_DIR"
+            continue
+        fi
+
+        echo -e "${BLUE}[→]${NC} 正在同步到 ${CYAN}$SERVER_NAME${NC} (${CYAN}$SERVER_HOST${NC})"
+        if [ -n "$LOG_FILE" ]; then
+            echo "----------------------------------------" >> "$LOG_FILE"
+            echo "目录同步: $SERVER_NAME → $SERVER_HOST:$TARGET_DIR" >> "$LOG_FILE"
+            echo "  源: $SOURCE_DIR" >> "$LOG_FILE"
+        fi
+
+        TEMP_RSYNC_PASS_FILE=""
+        RSYNC_SSH_OPTS=()
+        if [ "$AUTH_TYPE" = "ssh" ]; then
+            if [ ! -f "$AUTH_INFO" ]; then
+                log_error "SSH密钥不存在: $AUTH_INFO"
+                continue
+            fi
+            chmod 600 "$AUTH_INFO" 2>/dev/null || true
+            if ! ssh -i "$AUTH_INFO" -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o BatchMode=yes \
+                -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+                "$SERVER_HOST" "mkdir -p '$TARGET_DIR'" >/dev/null 2>&1; then
+                log_error "SSH 连接或创建目标目录失败: $SERVER_HOST"
+                sync_prompt skip_choice "是否跳过此服务器? (y/n): " "y"
+                [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ] && continue
+                exit 1
+            fi
+            RSYNC_SSH_OPTS=(-e "ssh -i $AUTH_INFO -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR")
+        elif [ "$AUTH_TYPE" = "password" ]; then
+            if ! command -v sshpass >/dev/null 2>&1; then
+                log_error "密码认证需要 sshpass"
+                continue
+            fi
+            TEMP_RSYNC_PASS_FILE=$(mktemp)
+            printf '%s\n' "$AUTH_INFO" > "$TEMP_RSYNC_PASS_FILE"
+            chmod 600 "$TEMP_RSYNC_PASS_FILE"
+            if ! sshpass -f "$TEMP_RSYNC_PASS_FILE" ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+                "$SERVER_HOST" "mkdir -p '$TARGET_DIR'" >/dev/null 2>&1; then
+                log_error "SSH 密码连接失败: $SERVER_HOST"
+                rm -f "$TEMP_RSYNC_PASS_FILE"
+                sync_prompt skip_choice "是否跳过此服务器? (y/n): " "y"
+                [ "$skip_choice" = "y" ] || [ "$skip_choice" = "Y" ] && continue
+                exit 1
+            fi
+            RSYNC_SSH_OPTS=(-e "sshpass -f $TEMP_RSYNC_PASS_FILE ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR")
+        else
+            log_error "未知认证类型: $AUTH_TYPE"
+            continue
+        fi
+
+        # 整目录覆盖；明确不加 --delete
+        local rsync_base=()
+        # shellcheck disable=SC2206
+        rsync_base=($RSYNC_OPTIONS)
+        echo -e "  ${YELLOW}[→]${NC} rsync 覆盖上传（不删除远端多余文件）..."
+        if [ "$VERBOSE" = true ]; then
+            rsync -v "${rsync_base[@]}" "${exclude_args[@]}" "${RSYNC_SSH_OPTS[@]}" \
+                "$SOURCE_DIR/" "$SERVER_HOST:$TARGET_DIR/"
+        else
+            rsync "${rsync_base[@]}" "${exclude_args[@]}" "${RSYNC_SSH_OPTS[@]}" \
+                "$SOURCE_DIR/" "$SERVER_HOST:$TARGET_DIR/"
+        fi
+        local RSYNC_EXIT_CODE=$?
+
+        [ -n "$TEMP_RSYNC_PASS_FILE" ] && rm -f "$TEMP_RSYNC_PASS_FILE"
+
+        if [ $RSYNC_EXIT_CODE -eq 0 ]; then
+            echo -e "  ${GREEN}[✓]${NC} 同步成功"
+            [ -n "$LOG_FILE" ] && echo "  同步结果: 成功" >> "$LOG_FILE"
+            execute_post_sync_commands "$i"
+        else
+            log_error "同步失败 (错误代码: $RSYNC_EXIT_CODE)"
+            sync_prompt continue_choice "是否继续同步其他服务器? (y/n): " "y"
+            if [ "$continue_choice" != "y" ] && [ "$continue_choice" != "Y" ]; then
+                if [ $HAS_PROXY -eq 1 ] && [ "${disable_proxy_choice:-}" = "y" ]; then
+                    export http_proxy=$BACKUP_HTTP_PROXY
+                    export https_proxy=$BACKUP_HTTPS_PROXY
+                    export all_proxy=$BACKUP_ALL_PROXY
+                    export no_proxy=$BACKUP_NO_PROXY
+                fi
+                exit 1
+            fi
+        fi
+    done
+
+    echo ""
+    echo -e "${GREEN}[✓]${NC} 所有服务器同步完成"
+    if [ $HAS_PROXY -eq 1 ] && [ "${disable_proxy_choice:-}" = "y" ]; then
+        export http_proxy=$BACKUP_HTTP_PROXY
+        export https_proxy=$BACKUP_HTTPS_PROXY
+        export all_proxy=$BACKUP_ALL_PROXY
+        export no_proxy=$BACKUP_NO_PROXY
+        echo -e "${GREEN}[✓]${NC} 代理设置已恢复"
+    fi
 }
 
 # 同步到服务器
@@ -2464,9 +2774,13 @@ main() {
     select_config_file
     parse_config
     select_server_group
-    pull_code
-    replace_configs
-    sync_to_servers
+    if [ "${CONFIG_TYPE:-git}" = "dir" ]; then
+        sync_dir_to_servers
+    else
+        pull_code
+        replace_configs
+        sync_to_servers
+    fi
     cleanup_credentials
 
     print_run_footer

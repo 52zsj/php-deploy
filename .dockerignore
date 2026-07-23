@@ -11,19 +11,21 @@
 **/*.pyo
 .venv-desktop/
 .venv/
+.uploads/
+yml/
 
-# 运行产物 / 本机数据
+# 运行产物 / 本机数据（仅放行 demo 模板进镜像）
 logs/**
 !logs/.gitignore
 replace/**
 !replace/.gitignore
-data/
+data/**
+!data/configs/
+!data/configs/demo.yml
+!data/configs/demo-dir.yml
 deploy/data/
 dist/
 
-# 业务配置：镜像仅保留 demo 模板
-yml/*
-!yml/demo.yml
 *.env
 *.git-credentials
 
