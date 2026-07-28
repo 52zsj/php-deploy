@@ -30,7 +30,7 @@ stage_framework() {
   rm -rf "$dest"
   mkdir -p "$dest/script" "$dest/replace" "$dest/logs" "$dest/data/configs" \
     "$dest/data/secrets" "$dest/data/credentials" "$dest/data/replace" \
-    "$dest/data/logs" "$dest/data/ssh"
+    "$dest/data/logs" "$dest/data/ssh" "$dest/data/repos" "$dest/data/uploads"
 
   cp -R sync.sh LICENSE NOTICE VERSION "$dest/"
   # 每次打包写入唯一 stamp，同版本号重打包也会触发安装目录覆盖
@@ -56,7 +56,8 @@ stage_framework() {
   if [ -f logs/.gitignore ]; then cp logs/.gitignore "$dest/logs/"; fi
   touch "$dest/data/configs/.gitkeep" "$dest/data/secrets/.gitkeep" \
     "$dest/data/credentials/.gitkeep" "$dest/data/replace/.gitkeep" \
-    "$dest/data/logs/.gitkeep" "$dest/data/ssh/.gitkeep"
+    "$dest/data/logs/.gitkeep" "$dest/data/ssh/.gitkeep" \
+    "$dest/data/repos/.gitkeep" "$dest/data/uploads/.gitkeep"
 
   chmod +x "$dest/sync.sh" \
     "$dest/script/start-ui.sh" "$dest/script/migrate-secrets.sh" \
@@ -121,13 +122,15 @@ gitship ${VERSION} (Docker)
 ==============================
 
   docker load -i ${tarname}
-  mkdir -p data/{configs,secrets,credentials,replace,logs,ssh}
+  mkdir -p data/{configs,secrets,credentials,replace,logs,ssh,repos,uploads}
   docker compose up -d
 
 UI: http://127.0.0.1:8765
 配置: data/configs/*.yml
 密钥: data/secrets/<配置名>.env
-SSH:  data/ssh/
+SSH:  data/ssh/（UI 可上传）
+检出: data/repos/
+上传: data/uploads/
 Replace: data/replace/
 
 同步示例:
@@ -277,32 +280,52 @@ services:
       SYNC_UI_HOST: "0.0.0.0"
       SYNC_UI_PORT: "8765"
       SYNC_UI_NO_BROWSER: "1"
+      DATA_CONFIGS: /data/configs
+      DATA_SECRETS: /data/secrets
+      DATA_CREDENTIALS: /data/credentials
+      DATA_REPLACE: /data/replace
+      DATA_LOGS: /data/logs
+      DATA_SSH: /data/ssh
+      DATA_REPOS: /data/repos
+      DATA_UPLOADS: /data/uploads
     volumes:
       - ./data/configs:/data/configs
       - ./data/secrets:/data/secrets
       - ./data/credentials:/data/credentials
       - ./data/replace:/data/replace
       - ./data/logs:/data/logs
-      - ./data/ssh:/data/ssh:ro
+      - ./data/ssh:/data/ssh
+      - ./data/repos:/data/repos
+      - ./data/uploads:/data/uploads
     restart: unless-stopped
   sync:
     image: ${IMAGE}
     profiles: ["cli"]
     environment:
       SYNC_UI_NO_BROWSER: "1"
+      DATA_CONFIGS: /data/configs
+      DATA_SECRETS: /data/secrets
+      DATA_CREDENTIALS: /data/credentials
+      DATA_REPLACE: /data/replace
+      DATA_LOGS: /data/logs
+      DATA_SSH: /data/ssh
+      DATA_REPOS: /data/repos
+      DATA_UPLOADS: /data/uploads
     volumes:
       - ./data/configs:/data/configs
       - ./data/secrets:/data/secrets
       - ./data/credentials:/data/credentials
       - ./data/replace:/data/replace
       - ./data/logs:/data/logs
-      - ./data/ssh:/data/ssh:ro
+      - ./data/ssh:/data/ssh
+      - ./data/repos:/data/repos
+      - ./data/uploads:/data/uploads
     entrypoint: ["/app/script/docker-entrypoint.sh"]
     command: ["sync"]
 EOF
 
   cp LICENSE NOTICE VERSION "$stage/${out_base}/"
-  for d in configs secrets credentials replace logs ssh; do
+  for d in configs secrets credentials replace logs ssh repos uploads; do
     mkdir -p "$stage/${out_base}/data/$d"
     touch "$stage/${out_base}/data/$d/.gitkeep"
   done
@@ -315,10 +338,10 @@ EOF
 set -euo pipefail
 cd "\$(dirname "\$0")"
 docker load -i ${img_tar}
-mkdir -p data/{configs,secrets,credentials,replace,logs,ssh}
+mkdir -p data/{configs,secrets,credentials,replace,logs,ssh,repos,uploads}
 docker compose up -d
 echo "UI: http://127.0.0.1:8765"
-echo "配置: ./data/configs/  密钥: ./data/secrets/  SSH: ./data/ssh/"
+echo "配置: ./data/configs/  SSH: ./data/ssh/  检出: ./data/repos/  上传: ./data/uploads/"
 EOF
   chmod +x "$stage/${out_base}/load-and-up.sh"
   tar -czf "$archive" -C "$stage" "$out_base"

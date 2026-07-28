@@ -1,17 +1,38 @@
 # GitShip Docker 编排：框架镜像 + 外挂 data/（密钥不进镜像）
 #
 # 首次：
-#   mkdir -p data/{configs,secrets,credentials,replace,logs,ssh}
+#   mkdir -p data/{configs,secrets,credentials,replace,logs,ssh,repos,uploads}
 #   docker compose build
 #   docker compose up -d
 #   浏览器打开 http://127.0.0.1:8765
 #
-# 配置放 data/configs/*.yml ，密码放 data/secrets/<配置名>.env ，SSH 私钥放 data/ssh/
+# 配置 data/configs/ · 密码 data/secrets/ · SSH data/ssh/
+# Git 检出 data/repos/ · 目录上传 data/uploads/ · Replace data/replace/
 #
 # CI 同步：
 #   docker compose run --rm sync sync -y --config=demo.yml --group=1 --post-sync=1
 
 name: gitship
+
+x-data-env: &data-env
+  DATA_CONFIGS: /data/configs
+  DATA_SECRETS: /data/secrets
+  DATA_CREDENTIALS: /data/credentials
+  DATA_REPLACE: /data/replace
+  DATA_LOGS: /data/logs
+  DATA_SSH: /data/ssh
+  DATA_REPOS: /data/repos
+  DATA_UPLOADS: /data/uploads
+
+x-data-volumes: &data-volumes
+  - ./data/configs:/data/configs
+  - ./data/secrets:/data/secrets
+  - ./data/credentials:/data/credentials
+  - ./data/replace:/data/replace
+  - ./data/logs:/data/logs
+  - ./data/ssh:/data/ssh
+  - ./data/repos:/data/repos
+  - ./data/uploads:/data/uploads
 
 services:
   ui:
@@ -29,19 +50,8 @@ services:
       SYNC_UI_HOST: "0.0.0.0"
       SYNC_UI_PORT: "8765"
       SYNC_UI_NO_BROWSER: "1"
-      DATA_CONFIGS: /data/configs
-      DATA_SECRETS: /data/secrets
-      DATA_CREDENTIALS: /data/credentials
-      DATA_REPLACE: /data/replace
-      DATA_LOGS: /data/logs
-      DATA_SSH: /data/ssh
-    volumes:
-      - ./data/configs:/data/configs
-      - ./data/secrets:/data/secrets
-      - ./data/credentials:/data/credentials
-      - ./data/replace:/data/replace
-      - ./data/logs:/data/logs
-      - ./data/ssh:/data/ssh:ro
+      <<: *data-env
+    volumes: *data-volumes
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/"]
       interval: 30s
@@ -56,18 +66,7 @@ services:
     profiles: ["cli"]
     environment:
       SYNC_UI_NO_BROWSER: "1"
-      DATA_CONFIGS: /data/configs
-      DATA_SECRETS: /data/secrets
-      DATA_CREDENTIALS: /data/credentials
-      DATA_REPLACE: /data/replace
-      DATA_LOGS: /data/logs
-      DATA_SSH: /data/ssh
-    volumes:
-      - ./data/configs:/data/configs
-      - ./data/secrets:/data/secrets
-      - ./data/credentials:/data/credentials
-      - ./data/replace:/data/replace
-      - ./data/logs:/data/logs
-      - ./data/ssh:/data/ssh:ro
+      <<: *data-env
+    volumes: *data-volumes
     entrypoint: ["/app/script/docker-entrypoint.sh"]
     command: ["sync"]

@@ -17,7 +17,7 @@ data/**
 !data/configs/demo.yml
 !data/configs/demo-dir.yml
 
-# 目录同步临时工作区（类似 Git local_dir）
+# 旧目录同步工作区（已迁到 data/uploads/）
 .uploads/
 
 # 旧 yml/ 目录已废弃（配置统一 data/configs/）

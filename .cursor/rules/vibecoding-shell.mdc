@@ -31,7 +31,9 @@ alwaysApply: false
   - 离线构建可 `GITSHIP_BASE_IMAGE=php-deploy:local docker compose build`
   - 离线构建可 `GITSHIP_BASE_IMAGE=php-deploy:local docker compose build`
 - `data/configs/demo.yml` / `demo-dir.yml`：仓库模板兼运行时配置目录（与 Docker 共用）
-- `.uploads/<配置名>/`：目录同步临时工作区（UI 上传目标；gitignore）
+- `data/ssh/`：SSH 私钥（UI 可上传）；`data/repos/`：Git 检出；`data/uploads/`：目录同步工作区
+- `data/replace/` / `data/credentials/` / `data/secrets/` / `data/logs/`：其余持久化数据
+- `.uploads/<配置名>/`：旧路径兼容（Docker 入口会链到 `data/uploads`）
 - `replace/<项目>/<env>/...`：环境配置覆盖源，路径相对仓库根
 - `script/`：新增维护 / cron / 一次性 CLI（主入口仍为根目录 `sync.sh`）
 

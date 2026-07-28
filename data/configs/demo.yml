@@ -1,13 +1,13 @@
 # GitShip 配置模板（type: git，缺省也可省略 type）
-# 复制到 data/configs/ 后按项目修改；密码用 secret:KEY，落在 .secrets/ 或 data/secrets/
+# 复制到 data/configs/ 后按项目修改；密码用 secret:KEY，落在 data/secrets/
 type: git
 
 gitee:
   repo_url: "https://gitee.com/example/demo-project.git"
   default_branch: "master"
-  local_dir: "/tmp/demo-project"
+  local_dir: "./data/repos/demo-project"
   auth_type: "ssh"                 # ssh | password
-  ssh_key: "~/.ssh/id_rsa"
+  ssh_key: "./data/ssh/id_rsa"
   # auth_type: password 时改用：
   # username: "username"
   # password: "secret:GITEE_PASSWORD"
@@ -19,7 +19,7 @@ sync:
     - "vendor"
     - "runtime/"
     - "uploads/"
-  replace_dir: "./replace/demo"
+  replace_dir: "./data/replace/demo"
 
 default_post_sync_commands:
   - "chown -R www:www {target_dir}"
@@ -33,4 +33,4 @@ server_groups:
         target_dir: "/www/wwwroot/demo"
         branch: "master"
         auth_type: "ssh"
-        auth_info: "~/.ssh/id_rsa"
+        auth_info: "./data/ssh/id_rsa"

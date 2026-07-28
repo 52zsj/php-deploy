@@ -10,6 +10,11 @@ const els = {
   defaultBranch: $("#defaultBranch"),
   localDir: $("#localDir"),
   gitSshKey: $("#gitSshKey"),
+  gitSshKeySelect: $("#gitSshKeySelect"),
+  sshUploadBtn: $("#sshUploadBtn"),
+  sshRefreshBtn: $("#sshRefreshBtn"),
+  sshUploadInput: $("#sshUploadInput"),
+  sshKeyHint: $("#sshKeyHint"),
   gitUsername: $("#gitUsername"),
   gitPassword: $("#gitPassword"),
   gitSshField: $("#gitSshField"),
@@ -80,17 +85,100 @@ function configBaseName() {
 
 function defaultReplaceDir(name) {
   const n = (name || configBaseName()).trim();
-  return n ? `./replace/${n}` : "";
+  return n ? `./data/replace/${n}` : "";
 }
 
 function defaultLocalDir(name) {
   const n = (name || configBaseName()).trim();
-  return n ? `/tmp/${n}` : "";
+  return n ? `./data/repos/${n}` : "";
 }
 
 function defaultUploadDir(name) {
   const n = (name || configBaseName()).trim();
-  return n ? `./.uploads/${n}` : "./.uploads/project";
+  return n ? `./data/uploads/${n}` : "./data/uploads/project";
+}
+
+function defaultSshKey() {
+  return "./data/ssh/id_rsa";
+}
+
+let sshKeysCache = [];
+
+async function refreshSshKeys(selectPath) {
+  try {
+    const res = await fetch("/api/ssh/keys");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "密钥列表失败");
+    sshKeysCache = data.keys || [];
+    fillSshSelect(els.gitSshKeySelect, selectPath || els.gitSshKey?.value);
+    $$(".server-ssh-select").forEach((sel) => {
+      const input = sel.closest(".field")?.querySelector(".server-auth-info");
+      fillSshSelect(sel, input?.value);
+    });
+    if (els.sshKeyHint) {
+      els.sshKeyHint.textContent = sshKeysCache.length
+        ? `已有 ${sshKeysCache.length} 个密钥 · ${data.dir || "data/ssh"}`
+        : "尚无密钥，请上传到 data/ssh/";
+    }
+  } catch (e) {
+    if (els.sshKeyHint) els.sshKeyHint.textContent = e.message;
+  }
+}
+
+function fillSshSelect(selectEl, currentPath) {
+  if (!selectEl) return;
+  const cur = (currentPath || "").trim();
+  selectEl.innerHTML = '<option value="">选择已上传密钥…</option>';
+  sshKeysCache.forEach((k) => {
+    const opt = document.createElement("option");
+    opt.value = k.path;
+    opt.textContent = k.name;
+    if (cur === k.path || cur.endsWith(`/${k.name}`) || cur.endsWith(`\\${k.name}`)) {
+      opt.selected = true;
+    }
+    selectEl.appendChild(opt);
+  });
+  if (cur && ![...selectEl.options].some((o) => o.value === cur)) {
+    const opt = document.createElement("option");
+    opt.value = cur;
+    opt.textContent = `当前: ${cur}`;
+    opt.selected = true;
+    selectEl.appendChild(opt);
+  }
+}
+
+async function uploadSshKeyFile(file) {
+  if (!file) return;
+  const name = file.name || "id_rsa";
+  try {
+    const res = await fetch("/api/ssh/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: name, content_b64: await fileToBase64(file) }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "上传失败");
+    const path = data.path || `./data/ssh/${name}`;
+    if (els.gitSshKey) els.gitSshKey.value = path;
+    await refreshSshKeys(path);
+    setSaveStatus(`已上传密钥 ${name}`, "ok");
+  } catch (e) {
+    setSaveStatus(e.message, "err");
+  }
+}
+
+function bindSshKeyUi() {
+  els.gitSshKeySelect?.addEventListener("change", () => {
+    if (els.gitSshKeySelect.value) els.gitSshKey.value = els.gitSshKeySelect.value;
+  });
+  els.sshUploadBtn?.addEventListener("click", () => els.sshUploadInput?.click());
+  els.sshRefreshBtn?.addEventListener("click", () => refreshSshKeys());
+  els.sshUploadInput?.addEventListener("change", async () => {
+    const f = els.sshUploadInput.files?.[0];
+    els.sshUploadInput.value = "";
+    if (f) await uploadSshKeyFile(f);
+  });
+  refreshSshKeys();
 }
 
 function getSyncType() {
@@ -180,23 +268,29 @@ function currentDeployEnv() {
 function onConfigNameChange() {
   const name = configBaseName();
   if (!name) return;
-  const prevLocal = lastAutoName ? `/tmp/${lastAutoName}` : "";
-  const prevReplace = lastAutoName ? `./replace/${lastAutoName}` : "";
-  const prevHomeReplace = lastAutoName ? `~/replace/${lastAutoName}` : "";
-  const prevUpload = lastAutoName ? `./.uploads/${lastAutoName}` : "";
-  if (!els.localDir.value.trim() || els.localDir.value.trim() === prevLocal) {
+  const prevLocals = [
+    lastAutoName ? `/tmp/${lastAutoName}` : "",
+    lastAutoName ? `./data/repos/${lastAutoName}` : "",
+  ].filter(Boolean);
+  const prevReplaces = [
+    lastAutoName ? `./replace/${lastAutoName}` : "",
+    lastAutoName ? `./data/replace/${lastAutoName}` : "",
+    lastAutoName ? `~/replace/${lastAutoName}` : "",
+  ].filter(Boolean);
+  const prevUploads = [
+    lastAutoName ? `./.uploads/${lastAutoName}` : "",
+    lastAutoName ? `./data/uploads/${lastAutoName}` : "",
+  ].filter(Boolean);
+  const curLocal = els.localDir.value.trim();
+  if (!curLocal || prevLocals.includes(curLocal)) {
     els.localDir.value = defaultLocalDir(name);
   }
   const curReplace = els.replaceDir.value.trim();
-  if (
-    !curReplace ||
-    curReplace === prevReplace ||
-    curReplace === prevHomeReplace ||
-    isHomeStyleReplaceDir(curReplace)
-  ) {
+  if (!curReplace || prevReplaces.includes(curReplace) || isHomeStyleReplaceDir(curReplace)) {
     els.replaceDir.value = defaultReplaceDir(name);
   }
-  if (!els.dirSourceDir.value.trim() || els.dirSourceDir.value.trim() === prevUpload) {
+  const curUpload = els.dirSourceDir.value.trim();
+  if (!curUpload || prevUploads.includes(curUpload)) {
     els.dirSourceDir.value = defaultUploadDir(name);
   }
   lastAutoName = name;
@@ -255,7 +349,7 @@ function syncServerAuthInfoType(card) {
       hint.classList.toggle("hidden", !saved);
     }
   } else {
-    input.placeholder = "~/.ssh/id_rsa";
+    input.placeholder = "./data/ssh/id_rsa";
     if (hint) hint.classList.add("hidden");
   }
 }
@@ -312,7 +406,7 @@ function createServerCard(data = {}) {
     $(".server-auth-info", node).value = "";
     node.dataset.authSaved = data._auth_info_saved ? "1" : "0";
   } else {
-    $(".server-auth-info", node).value = data.auth_info || "";
+    $(".server-auth-info", node).value = data.auth_info || defaultSshKey();
     node.dataset.authSaved = "0";
   }
   $(".server-post-sync", node).value = listToLines(
@@ -323,6 +417,14 @@ function createServerCard(data = {}) {
     r.addEventListener("change", () => syncServerAuthInfoType(node));
   });
   syncServerAuthInfoType(node);
+
+  const sshSelect = $(".server-ssh-select", node);
+  if (sshSelect) {
+    fillSshSelect(sshSelect, $(".server-auth-info", node).value);
+    sshSelect.addEventListener("change", () => {
+      if (sshSelect.value) $(".server-auth-info", node).value = sshSelect.value;
+    });
+  }
 
   $(".remove-server", node).addEventListener("click", () => node.remove());
   return node;
@@ -546,7 +648,8 @@ function fillForm(payload) {
   const auth = raw.gitee?.auth_type || "ssh";
   $(`input[name="gitAuth"][value="${auth}"]`) && ($(`input[name="gitAuth"][value="${auth}"]`).checked = true);
   setGitAuthUI(auth);
-  els.gitSshKey.value = raw.gitee?.ssh_key || "~/.ssh/id_rsa";
+  els.gitSshKey.value = raw.gitee?.ssh_key || defaultSshKey();
+  fillSshSelect(els.gitSshKeySelect, els.gitSshKey.value);
   els.gitUsername.value = raw.gitee?.username || "";
   els.gitPassword.value = "";
   const gitHint = $("#gitPasswordHint");
@@ -914,6 +1017,7 @@ els.clearOutputBtn.addEventListener("click", () => {
 });
 
 bindGitAuthRadios();
+bindSshKeyUi();
 fetchConfigs().then(() => loadConfig("demo.yml").catch(() => addGroup()));
 
 /* ── Tabs ── */

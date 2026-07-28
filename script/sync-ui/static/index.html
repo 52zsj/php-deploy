@@ -38,7 +38,7 @@
               <div class="field">
                 <label for="configName">配置名</label>
                 <input id="configName" required placeholder="myproject">
-                <p class="field-hint">Git 模式用 ./replace/配置名；目录模式上传到 ./.uploads/配置名</p>
+                <p class="field-hint">路径均落在 data/：检出 repos、Replace、上传 uploads、SSH 密钥 ssh</p>
               </div>
               <div class="field">
                 <label>同步类型</label>
@@ -62,7 +62,7 @@
                 </div>
                 <div class="field">
                   <label for="localDir">本地目录</label>
-                  <input id="localDir" placeholder="/tmp/myproject">
+                  <input id="localDir" placeholder="./data/repos/myproject">
                 </div>
               </div>
               <div class="field">
@@ -74,7 +74,18 @@
               </div>
               <div class="field" id="gitSshField">
                 <label for="gitSshKey">SSH 密钥</label>
-                <input id="gitSshKey" value="~/.ssh/id_rsa">
+                <div class="ssh-key-row">
+                  <select id="gitSshKeySelect">
+                    <option value="">选择已上传密钥…</option>
+                  </select>
+                  <input id="gitSshKey" value="./data/ssh/id_rsa" placeholder="./data/ssh/id_rsa">
+                </div>
+                <div class="replace-toolbar" style="margin-top:8px">
+                  <button type="button" class="btn secondary sm" id="sshUploadBtn">上传密钥到 data/ssh</button>
+                  <button type="button" class="btn ghost sm" id="sshRefreshBtn">刷新列表</button>
+                  <input type="file" id="sshUploadInput" class="hidden">
+                </div>
+                <p class="field-hint" id="sshKeyHint">Docker 请上传私钥到 data/ssh/（映射持久化）</p>
               </div>
               <div class="grid-2 hidden" id="gitPasswordFields">
                 <div class="field">
@@ -91,10 +102,10 @@
 
             <section class="block hidden" id="blockDir">
               <h2>目录同步</h2>
-              <p class="field-hint">上传本地构建产物到容器临时目录，再 rsync 覆盖到服务器（不删除远端多余文件）。Docker 下无需挂载宿主机路径。</p>
+              <p class="field-hint">上传构建产物到 data/uploads/（Docker 已映射），再 rsync 覆盖到服务器（不删除远端多余文件）。</p>
               <div class="field">
                 <label for="dirSourceDir">工作区路径</label>
-                <input id="dirSourceDir" readonly placeholder="./.uploads/myproject">
+                <input id="dirSourceDir" readonly placeholder="./data/uploads/myproject">
               </div>
               <div class="replace-toolbar">
                 <button type="button" class="btn secondary sm" id="dirUploadDirBtn">上传文件夹</button>
@@ -128,8 +139,8 @@
                   <p class="field-hint">点开头目录（.git / .cursor / .idea / …）已内置过滤，无需再写</p>
                 </div>
                 <div class="field">
-                  <label for="replaceDir">Replace 目录（默认 ./replace/配置名）</label>
-                  <input id="replaceDir" placeholder="./replace/myproject">
+                  <label for="replaceDir">Replace 目录（默认 ./data/replace/配置名）</label>
+                  <input id="replaceDir" placeholder="./data/replace/myproject">
                 </div>
                 <div class="field">
                   <label for="defaultPostSync">全局同步后命令（可选）</label>
@@ -296,7 +307,12 @@
       </div>
       <div class="field">
         <label>auth_info（密钥路径；密码认证时填新密码）</label>
-        <input class="server-auth-info" placeholder="~/.ssh/id_rsa" autocomplete="off" spellcheck="false">
+        <div class="ssh-key-row">
+          <select class="server-ssh-select">
+            <option value="">选择已上传密钥…</option>
+          </select>
+          <input class="server-auth-info" placeholder="./data/ssh/id_rsa" autocomplete="off" spellcheck="false">
+        </div>
         <p class="field-hint server-auth-hint hidden">密码已保存到 .secrets，界面不回显</p>
       </div>
       <div class="field">
@@ -306,6 +322,6 @@
     </div>
   </template>
 
-  <script src="/static/app.js?v=20260723a"></script>
+  <script src="/static/app.js?v=20260728a"></script>
 </body>
 </html>

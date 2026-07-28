@@ -309,7 +309,101 @@ MAX_ARCHIVE_BYTES = 20 * 1024 * 1024  # 压缩包 20MB
 MAX_DIR_UPLOAD_FILES = 5000
 MAX_DIR_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_DIR_ARCHIVE_BYTES = 200 * 1024 * 1024
-UPLOADS_DIRNAME = ".uploads"
+UPLOADS_DIRNAME = "data/uploads"
+SSH_DIRNAME = "data/ssh"
+REPOS_DIRNAME = "data/repos"
+
+
+def data_ssh_dir() -> Path:
+    env = (os.environ.get("DATA_SSH") or "").strip()
+    root = Path(env).expanduser() if env else (PROJECT_ROOT / SSH_DIRNAME)
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def data_uploads_dir() -> Path:
+    env = (os.environ.get("DATA_UPLOADS") or "").strip()
+    root = Path(env).expanduser() if env else (PROJECT_ROOT / UPLOADS_DIRNAME)
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def data_repos_dir() -> Path:
+    env = (os.environ.get("DATA_REPOS") or "").strip()
+    root = Path(env).expanduser() if env else (PROJECT_ROOT / REPOS_DIRNAME)
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def _safe_ssh_filename(name: str) -> str:
+    base = Path(name or "").name.strip()
+    if not base or base in (".", "..") or ".." in base:
+        raise ValueError("无效的密钥文件名")
+    if base.startswith(".") and base not in (".gitkeep",):
+        # 允许 known_hosts / config，禁止隐藏乱路径
+        if base not in ("known_hosts", "config", "authorized_keys"):
+            pass
+    return base
+
+
+def list_ssh_keys() -> dict:
+    root = data_ssh_dir()
+    keys = []
+    for p in sorted(root.iterdir(), key=lambda x: x.name.lower()):
+        if not p.is_file():
+            continue
+        if p.name in (".gitkeep",) or p.name.endswith(".md"):
+            continue
+        if p.name.endswith(".pub"):
+            continue
+        keys.append(
+            {
+                "name": p.name,
+                "path": f"./data/ssh/{p.name}",
+                "size": p.stat().st_size,
+            }
+        )
+    return {"ok": True, "dir": str(root), "keys": keys, "default": "./data/ssh/id_rsa"}
+
+
+def upload_ssh_key(filename: str, content_b64: str) -> dict:
+    name = _safe_ssh_filename(filename)
+    raw = base64.b64decode(content_b64 or "")
+    if not raw:
+        raise ValueError("密钥内容为空")
+    if len(raw) > 256 * 1024:
+        raise ValueError("密钥文件过大")
+    dest = data_ssh_dir() / name
+    dest.write_bytes(raw)
+    try:
+        dest.chmod(0o600)
+    except OSError:
+        pass
+    # Docker：同步到 ~/.ssh，兼容旧配置路径
+    home_ssh = Path.home() / ".ssh"
+    try:
+        home_ssh.mkdir(mode=0o700, parents=True, exist_ok=True)
+        mirror = home_ssh / name
+        mirror.write_bytes(raw)
+        mirror.chmod(0o600)
+    except OSError:
+        pass
+    return {"ok": True, "name": name, "path": f"./data/ssh/{name}", **list_ssh_keys()}
+
+
+def delete_ssh_key(filename: str) -> dict:
+    name = _safe_ssh_filename(filename)
+    dest = data_ssh_dir() / name
+    if dest.is_file():
+        dest.unlink()
+    mirror = Path.home() / ".ssh" / name
+    if mirror.is_file() and mirror.resolve() != dest.resolve():
+        try:
+            mirror.unlink()
+        except OSError:
+            pass
+    return list_ssh_keys()
+
 ARCHIVE_SKIP_NAMES = {"__macosx", ".ds_store", "thumbs.db"}
 
 
@@ -671,23 +765,21 @@ def ensure_replace_env(replace_dir: str, env: str) -> dict:
 
 
 def _uploads_root() -> Path:
-    root = PROJECT_ROOT / UPLOADS_DIRNAME
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return data_uploads_dir()
 
 
 def resolve_upload_workdir(config_name: str) -> Path:
-    """配置名 → .uploads/<stem>/（容器内临时工作区）。"""
+    """配置名 → data/uploads/<stem>/（Docker 映射持久化）。"""
     stem = Path(config_name or "").name
     if stem.endswith(".yml"):
         stem = stem[:-4]
     stem = stem.strip()
     if not stem or ".." in stem or "/" in stem or "\\" in stem:
         raise ValueError("无效的配置名")
-    dest = _uploads_root() / stem
+    root = _uploads_root()
+    dest = root / stem
     dest.mkdir(parents=True, exist_ok=True)
-    # 确保仍在 .uploads 内
-    dest.resolve().relative_to(_uploads_root().resolve())
+    dest.resolve().relative_to(root.resolve())
     return dest
 
 
@@ -695,7 +787,7 @@ def dir_upload_status(config_name: str) -> dict:
     dest = resolve_upload_workdir(config_name)
     files = [p for p in dest.rglob("*") if p.is_file()]
     total = sum(p.stat().st_size for p in files)
-    rel = f"./{UPLOADS_DIRNAME}/{dest.name}"
+    rel = f"./data/uploads/{dest.name}"
     return {
         "ok": True,
         "source_dir": rel,
@@ -1173,6 +1265,13 @@ class SyncUIHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
+        if path == "/api/ssh/keys":
+            try:
+                self._send_json(HTTPStatus.OK, list_ssh_keys())
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
         if path == "/api/replace/envs":
             qs = parse_qs(parsed.query)
             replace_dir = (qs.get("replace_dir") or [""])[0]
@@ -1345,6 +1444,25 @@ class SyncUIHandler(BaseHTTPRequestHandler):
                 body = self._read_json()
                 clear_dir_workdir(body.get("config") or body.get("config_name") or "")
                 self._send_json(HTTPStatus.OK, dir_upload_status(body.get("config") or body.get("config_name") or ""))
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        if path == "/api/ssh/upload":
+            try:
+                body = self._read_json()
+                self._send_json(
+                    HTTPStatus.OK,
+                    upload_ssh_key(body.get("filename") or body.get("name") or "", body.get("content_b64") or ""),
+                )
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        if path == "/api/ssh/delete":
+            try:
+                body = self._read_json()
+                self._send_json(HTTPStatus.OK, delete_ssh_key(body.get("filename") or body.get("name") or ""))
             except Exception as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return

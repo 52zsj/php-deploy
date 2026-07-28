@@ -2,7 +2,7 @@
 type: dir
 
 dir:
-  source_dir: "./.uploads/demo"
+  source_dir: "./data/uploads/demo"
 
 sync:
   rsync_options: "-az --progress"
@@ -21,4 +21,4 @@ server_groups:
         host: "user@example.com"
         target_dir: "/www/wwwroot/demo-static"
         auth_type: "ssh"
-        auth_info: "~/.ssh/id_rsa"
+        auth_info: "./data/ssh/id_rsa"

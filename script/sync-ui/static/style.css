@@ -708,6 +708,18 @@ textarea {
   gap: 10px;
 }
 
+.ssh-key-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.9fr) 1.1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.ssh-key-row select,
+.ssh-key-row input {
+  width: 100%;
+}
+
 /* ── Buttons ── */
 .btn {
   border: none;

@@ -9,22 +9,33 @@ DATA_CREDENTIALS="${DATA_CREDENTIALS:-/data/credentials}"
 DATA_REPLACE="${DATA_REPLACE:-/data/replace}"
 DATA_LOGS="${DATA_LOGS:-/data/logs}"
 DATA_SSH="${DATA_SSH:-/data/ssh}"
+DATA_REPOS="${DATA_REPOS:-/data/repos}"
+DATA_UPLOADS="${DATA_UPLOADS:-/data/uploads}"
+
+export DATA_CONFIGS DATA_SECRETS DATA_CREDENTIALS DATA_REPLACE DATA_LOGS DATA_SSH DATA_REPOS DATA_UPLOADS
 
 link_dir() {
   local src="$1"
   local dst="$2"
   mkdir -p "$src"
   if [ -d "$dst" ] && [ ! -L "$dst" ]; then
+    # 把旧目录内容迁到挂载卷（不覆盖已有）
+    for f in "$dst"/* "$dst"/.[!.]* "$dst"/..?*; do
+      [ -e "$f" ] || continue
+      base=$(basename "$f")
+      if [ ! -e "$src/$base" ]; then
+        cp -a "$f" "$src/$base" 2>/dev/null || true
+      fi
+    done
     rm -rf "$dst"
   fi
   ln -sfn "$src" "$dst"
 }
 
-# 宿主机 data/configs → /app/data/configs（整目录链接）
+# 宿主机 data/configs → /app/data/configs
 sync_configs() {
   mkdir -p "$DATA_CONFIGS"
 
-  # 升级兼容：旧镜像 /app/yml 普通目录 → 迁到 data
   if [ -d /app/yml ] && [ ! -L /app/yml ]; then
     for f in /app/yml/*.yml /app/yml/*.yaml; do
       [ -e "$f" ] || continue
@@ -37,7 +48,6 @@ sync_configs() {
     rm -rf /app/yml
   fi
 
-  # 种子模板：宿主机没有时从镜像 config.seed 拷贝
   for demo in demo.yml demo-dir.yml; do
     if [ ! -f "$DATA_CONFIGS/$demo" ] && [ -f "/app/config.seed/$demo" ]; then
       cp "/app/config.seed/$demo" "$DATA_CONFIGS/$demo" 2>/dev/null || true
@@ -48,20 +58,32 @@ sync_configs() {
   link_dir "$DATA_CONFIGS" /app/data/configs
 }
 
+mkdir -p /app/data
 link_dir "$DATA_SECRETS" /app/.secrets
+link_dir "$DATA_SECRETS" /app/data/secrets
 link_dir "$DATA_CREDENTIALS" /app/.credentials
+link_dir "$DATA_CREDENTIALS" /app/data/credentials
 link_dir "$DATA_REPLACE" /app/replace
+link_dir "$DATA_REPLACE" /app/data/replace
 link_dir "$DATA_LOGS" /app/logs
+link_dir "$DATA_LOGS" /app/data/logs
+link_dir "$DATA_REPOS" /app/data/repos
+link_dir "$DATA_UPLOADS" /app/data/uploads
+link_dir "$DATA_UPLOADS" /app/.uploads
+link_dir "$DATA_SSH" /app/data/ssh
 sync_configs
 
-# SSH 密钥（只读挂载常见）
+# SSH：同步到 ~/.ssh，兼容配置里仍写 ~/.ssh/id_rsa 的旧项目
 if [ -d "$DATA_SSH" ]; then
   mkdir -p /root/.ssh
   chmod 700 /root/.ssh
   for f in "$DATA_SSH"/*; do
     [ -e "$f" ] || continue
+    [ -f "$f" ] || continue
     name=$(basename "$f")
-    # 每次启动覆盖，保证宿主机更新能进容器
+    case "$name" in
+      .gitkeep|README*|*.md) continue ;;
+    esac
     cp -a "$f" "/root/.ssh/$name"
   done
   chmod 600 /root/.ssh/* 2>/dev/null || true
@@ -78,7 +100,8 @@ case "$cmd" in
     export SYNC_UI_HOST="${SYNC_UI_HOST:-0.0.0.0}"
     export SYNC_UI_PORT="${SYNC_UI_PORT:-8765}"
     export SYNC_UI_NO_BROWSER=1
-    echo "[gitship] UI http://${SYNC_UI_HOST}:${SYNC_UI_PORT}  (data: configs→yml, secrets, replace, logs, ssh)"
+    echo "[gitship] UI http://${SYNC_UI_HOST}:${SYNC_UI_PORT}"
+    echo "[gitship] data: configs secrets credentials replace logs ssh repos uploads"
     exec python3 /app/script/sync-ui/app.py
     ;;
   sync)

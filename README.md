@@ -65,7 +65,7 @@ chmod +x sync.sh script/start-ui.sh
 ### 方式二：Docker（推荐部署）
 
 ```bash
-mkdir -p data/{configs,secrets,credentials,replace,logs,ssh}
+mkdir -p data/{configs,secrets,credentials,replace,logs,ssh,repos,uploads}
 docker compose build
 docker compose up -d
 # 浏览器打开 http://127.0.0.1:8765
@@ -83,17 +83,20 @@ GITSHIP_BASE_IMAGE=gitship:local docker compose build
 # 3）怀疑 IPv6 超时：Docker Desktop → Settings → Docker Engine 加 "ipv6": false 后 Apply & Restart，再重试
 ```
 
-宿主机目录与容器映射：
+宿主机目录与容器映射（全部可读写，重建容器不丢）：
 
 | 宿主机 | 说明 |
 |--------|------|
-| `data/configs/*.yml` | 项目配置（容器内 `/data/configs`，重建不丢） |
+| `data/configs/*.yml` | 项目配置 |
 | `data/secrets/<名>.env` | 密码等密钥 |
-| `data/ssh/` | SSH 私钥（只读挂载） |
+| `data/ssh/` | SSH 私钥（Web UI 可上传） |
+| `data/credentials/` | Git credential helper 缓存 |
+| `data/repos/` | Git 本地检出目录（换仓库可直接删） |
+| `data/uploads/` | 目录同步上传工作区 |
 | `data/replace/` | 环境替换文件 |
 | `data/logs/` | 同步日志 |
 
-Web UI 保存的配置会直接写到宿主机 `data/configs/`，重建容器不会丢。无配置时自动从镜像种子 `demo.yml` / `demo-dir.yml`。
+Web UI：SSH 密钥用「上传密钥到 data/ssh」；Git 本地目录默认 `./data/repos/<配置名>`；目录同步默认 `./data/uploads/<配置名>`。无配置时自动种子 `demo.yml` / `demo-dir.yml`。
 
 **命令行同步（CI / 一次性）：**
 
@@ -207,17 +210,19 @@ pack.sh                 # 打包快捷入口 → script/pack.sh
 docker-compose.yml
 data/configs/demo.yml       # Git 配置模板
 data/configs/demo-dir.yml   # 目录同步模板
-data/configs/*.yml          # 运行时配置（CLI / UI / Docker 共用）
-replace/<项目>/<env>/       # 环境替换文件
-.secrets/<配置名>.env       # 密钥（gitignore）
-.credentials/               # Git 凭据缓存（gitignore）
-logs/<配置名>/              # 同步日志
+data/configs/*.yml          # 运行时配置
+data/ssh/                   # SSH 私钥（UI 可上传）
+data/repos/                 # Git 本地检出
+data/uploads/               # 目录同步工作区
+data/replace/               # 环境替换
+data/secrets/               # 密码
+data/credentials/           # Git 凭据缓存
+data/logs/                  # 同步日志
 script/
   start-ui.sh               # 启动 Web UI
   sync-ui/                  # Web 界面
   pack.sh                   # 多平台打包
   docker-entrypoint.sh
-data/                       # Docker 外挂数据卷（见上表）
 ```
 
 ---

@@ -360,6 +360,31 @@ expand_path() {
     echo "$path"
 }
 
+# SSH 私钥：优先配置路径；缺失时回退 data/ssh/<文件名>（Docker 映射目录）
+resolve_ssh_key() {
+    local key base alt
+    key=$(expand_path "$1")
+    if [ -f "$key" ]; then
+        echo "$key"
+        return
+    fi
+    base=$(basename "$key")
+    [ -n "$base" ] || { echo "$key"; return; }
+    if [ -n "${DATA_SSH:-}" ]; then
+        alt="${DATA_SSH%/}/$base"
+        if [ -f "$alt" ]; then
+            echo "$alt"
+            return
+        fi
+    fi
+    alt="$SCRIPT_DIR/data/ssh/$base"
+    if [ -f "$alt" ]; then
+        echo "$alt"
+        return
+    fi
+    echo "$key"
+}
+
 # 当前配置对应的 secrets 文件路径
 secrets_file_path() {
     local base
@@ -857,7 +882,7 @@ parse_config_git() {
 
         if [ "$GIT_AUTH_TYPE" = "ssh" ]; then
             GIT_SSH_KEY=$(yq e '.gitee.ssh_key' "$CONFIG_FILE")
-            GIT_SSH_KEY=$(expand_path "$GIT_SSH_KEY")
+            GIT_SSH_KEY=$(resolve_ssh_key "$GIT_SSH_KEY")
         elif [ "$GIT_AUTH_TYPE" = "password" ]; then
             GIT_USERNAME=$(yq e '.gitee.username' "$CONFIG_FILE")
             GIT_PASSWORD_RAW=$(yq e '.gitee.password' "$CONFIG_FILE")
@@ -1059,7 +1084,7 @@ setup_git_credentials() {
     # 从配置文件名中提取基本名称（不含路径和扩展名）
     CONFIG_FILE_BASE=$(basename "$CONFIG_FILE" .yml)
     # 创建一个基于配置文件名的凭据文件路径
-    CREDENTIALS_DIR="$SCRIPT_DIR/.credentials"
+    CREDENTIALS_DIR="${DATA_CREDENTIALS:-$SCRIPT_DIR/.credentials}"
     mkdir -p "$CREDENTIALS_DIR"
     GIT_CREDENTIALS_FILE="$CREDENTIALS_DIR/$CONFIG_FILE_BASE.git-credentials"
 
@@ -1084,9 +1109,10 @@ setup_git_credentials() {
 
         log_info "Git 凭据文件: $GIT_CREDENTIALS_FILE"
     elif [ "$GIT_AUTH_TYPE" = "ssh" ]; then
+        GIT_SSH_KEY=$(resolve_ssh_key "$GIT_SSH_KEY")
         # 确保SSH密钥存在
         if [ ! -f "$GIT_SSH_KEY" ]; then
-            log_error "SSH密钥 $GIT_SSH_KEY 不存在，请检查配置文件中的 ssh_key 路径；当前 HOME=$HOME"
+            log_error "SSH密钥 $GIT_SSH_KEY 不存在；请放到 data/ssh/ 或在 Web UI 上传；当前 HOME=$HOME DATA_SSH=${DATA_SSH:-}"
             exit 1
         fi
 
@@ -1532,7 +1558,7 @@ sync_dir_to_servers() {
             AUTH_TYPE=$(yq e ".server_groups[$GROUP_INDEX].servers[$i].auth_type" "$CONFIG_FILE")
             AUTH_INFO=$(yq e ".server_groups[$GROUP_INDEX].servers[$i].auth_info" "$CONFIG_FILE")
             if [[ "$AUTH_TYPE" = "ssh" ]]; then
-                AUTH_INFO=$(expand_path "$AUTH_INFO")
+                AUTH_INFO=$(resolve_ssh_key "$AUTH_INFO")
             elif [[ "$AUTH_TYPE" = "password" ]]; then
                 AUTH_INFO=$(resolve_secret "$AUTH_INFO" "servers[$i].auth_info")
             fi
@@ -1544,7 +1570,7 @@ sync_dir_to_servers() {
             AUTH_TYPE=$(echo "$SERVER_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['auth_type'])")
             AUTH_INFO=$(echo "$SERVER_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['auth_info'])")
             if [[ "$AUTH_TYPE" = "ssh" ]]; then
-                AUTH_INFO=$(expand_path "$AUTH_INFO")
+                AUTH_INFO=$(resolve_ssh_key "$AUTH_INFO")
             elif [[ "$AUTH_TYPE" = "password" ]]; then
                 AUTH_INFO=$(resolve_secret "$AUTH_INFO" "servers[$i].auth_info")
             fi
@@ -1689,7 +1715,7 @@ sync_to_servers() {
             AUTH_INFO=$(yq e ".server_groups[$GROUP_INDEX].servers[$i].auth_info" "$CONFIG_FILE")
             # 展开路径中的~
             if [[ "$AUTH_TYPE" = "ssh" ]]; then
-                AUTH_INFO=$(expand_path "$AUTH_INFO")
+                AUTH_INFO=$(resolve_ssh_key "$AUTH_INFO")
             elif [[ "$AUTH_TYPE" = "password" ]]; then
                 AUTH_INFO=$(resolve_secret "$AUTH_INFO" "servers[$i].auth_info")
             fi
@@ -1703,7 +1729,7 @@ sync_to_servers() {
             AUTH_INFO=$(echo "$SERVER_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['auth_info'])")
             # 展开路径中的~
             if [[ "$AUTH_TYPE" = "ssh" ]]; then
-                AUTH_INFO=$(expand_path "$AUTH_INFO")
+                AUTH_INFO=$(resolve_ssh_key "$AUTH_INFO")
             elif [[ "$AUTH_TYPE" = "password" ]]; then
                 AUTH_INFO=$(resolve_secret "$AUTH_INFO" "servers[$i].auth_info")
             fi
@@ -2449,7 +2475,7 @@ execute_post_sync_commands() {
 
         # 展开路径 / 解析密码引用
         if [[ "$AUTH_TYPE" = "ssh" ]]; then
-            AUTH_INFO=$(expand_path "$AUTH_INFO")
+            AUTH_INFO=$(resolve_ssh_key "$AUTH_INFO")
         elif [[ "$AUTH_TYPE" = "password" ]]; then
             AUTH_INFO=$(resolve_secret "$AUTH_INFO" "post_sync.auth_info")
             if [ -z "$AUTH_INFO" ]; then

@@ -58,9 +58,9 @@ RUN chmod +x sync.sh script/*.sh \
     && find script/sync-ui -name '*.pyc' -delete 2>/dev/null || true \
     && mkdir -p \
          logs .secrets .credentials replace .uploads config.seed \
-         data/configs \
+         data/configs data/repos data/uploads data/ssh \
          /data/configs /data/secrets /data/credentials \
-         /data/replace /data/logs /data/ssh \
+         /data/replace /data/logs /data/ssh /data/repos /data/uploads \
     && git config --global --add safe.directory '*' \
     && git config --global init.defaultBranch master || true
 
